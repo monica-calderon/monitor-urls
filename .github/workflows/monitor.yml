@@ -60,5 +60,7 @@ jobs:
           TZ: Europe/Madrid
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
+          GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
           MONITOR_URLS_JSON: ${{ secrets.MONITOR_URLS_JSON }}
         run: python monitor.py

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import base64
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Iterable
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -24,10 +26,16 @@ if hasattr(sys.stderr, "reconfigure"):
 STATE_DIR = Path(os.getenv("STATE_DIR", ".monitor_state"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_ALLOWED_USER_ID = os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip()
+GH_SECRETS_PAT = os.getenv("GH_SECRETS_PAT", "").strip()
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "monica-calderon/monitor-urls").strip()
+TELEGRAM_UPDATES_JSON = os.getenv("TELEGRAM_UPDATES_JSON", "").strip()
 DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes", "si"}
 ACTION_TO_RUN = os.getenv("ACTION_TO_RUN", "normal").strip().lower()
 MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
 MADRID_TIMEZONE = ZoneInfo("Europe/Madrid")
+TELEGRAM_OFFSET_PATH = STATE_DIR / "telegram_update_offset.txt"
+URL_PATTERN = re.compile(r"https?://[^\s<>()\"']+", re.IGNORECASE)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -111,6 +119,46 @@ def is_error_reminder_window(now_madrid: datetime) -> bool:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug or hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def build_auto_name_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().split("@")[-1].split(":")[0]
+    host = host.removeprefix("www.")
+    return slugify(host) or "nueva-url"
+
+
+def normalize_url(value: str) -> str:
+    return value.strip().rstrip(".,;:!?)\"]}")
+
+
+def extract_first_url(text: str) -> str | None:
+    match = URL_PATTERN.search(text)
+    if not match:
+        return None
+
+    url = normalize_url(match.group(0))
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return url
+
+
+def load_telegram_offset() -> int:
+    if not TELEGRAM_OFFSET_PATH.exists():
+        return 0
+    raw_offset = TELEGRAM_OFFSET_PATH.read_text(encoding="utf-8").strip()
+    if not raw_offset:
+        return 0
+    try:
+        return int(raw_offset)
+    except ValueError:
+        return 0
+
+
+def save_telegram_offset(offset: int) -> None:
+    TELEGRAM_OFFSET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TELEGRAM_OFFSET_PATH.write_text(str(offset), encoding="utf-8")
 
 
 def clean_text(html: str | bytes) -> str:
@@ -370,6 +418,42 @@ def send_telegram_document(path: Path, caption: str) -> None:
             response.raise_for_status()
 
 
+def fetch_telegram_updates(offset: int) -> list[dict[str, object]]:
+    if TELEGRAM_UPDATES_JSON:
+        try:
+            updates = json.loads(TELEGRAM_UPDATES_JSON)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("TELEGRAM_UPDATES_JSON no contiene JSON valido.") from exc
+        if not isinstance(updates, list):
+            raise RuntimeError("TELEGRAM_UPDATES_JSON debe ser una lista.")
+        return [update for update in updates if isinstance(update, dict)]
+
+    if not TELEGRAM_BOT_TOKEN:
+        print("Telegram no configurado: no se revisan mensajes entrantes.")
+        return []
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    params: dict[str, object] = {
+        "timeout": 0,
+        "allowed_updates": json.dumps(["message"]),
+    }
+    if offset:
+        params["offset"] = offset + 1
+
+    with httpx.Client(timeout=30) as client:
+        response = client.get(api_url, params=params)
+        response.raise_for_status()
+        payload = response.json()
+
+    if not payload.get("ok"):
+        raise RuntimeError("Telegram getUpdates no devolvio ok=true.")
+
+    result = payload.get("result", [])
+    if not isinstance(result, list):
+        raise RuntimeError("Telegram getUpdates devolvio un formato no esperado.")
+    return [update for update in result if isinstance(update, dict)]
+
+
 def try_send_telegram(message: str) -> None:
     try:
         send_telegram(message)
@@ -390,6 +474,161 @@ def try_send_telegram_document(path: Path, caption: str) -> None:
             "El documento no se muestra en logs para no publicar URLs privadas.",
             file=sys.stderr,
         )
+
+
+def encrypt_github_secret(public_key_value: str, secret_value: str) -> str:
+    try:
+        from nacl import encoding, public
+    except Exception as exc:  # pragma: no cover - depends on dependency install
+        raise RuntimeError("Falta PyNaCl para cifrar el secret de GitHub.") from exc
+
+    public_key = public.PublicKey(
+        public_key_value.encode("utf-8"),
+        encoding.Base64Encoder(),
+    )
+    sealed_box = public.SealedBox(public_key)
+    encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
+    return base64.b64encode(encrypted).decode("utf-8")
+
+
+def update_monitor_urls_secret(configs: list[dict[str, object]]) -> None:
+    if DRY_RUN:
+        print("\n--- ACTUALIZACION SECRET DRY_RUN ---")
+        print(f"Secret: MONITOR_URLS_JSON")
+        print(f"URLs totales: {len(configs)}")
+        print("--- FIN ACTUALIZACION SECRET ---\n")
+        return
+
+    if not GH_SECRETS_PAT:
+        raise RuntimeError("Falta GH_SECRETS_PAT para actualizar MONITOR_URLS_JSON.")
+    if not GITHUB_REPOSITORY or "/" not in GITHUB_REPOSITORY:
+        raise RuntimeError("GITHUB_REPOSITORY no tiene formato owner/repo.")
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {GH_SECRETS_PAT}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    secret_value = json.dumps(configs, ensure_ascii=False, indent=2)
+    base_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets"
+
+    with httpx.Client(headers=headers, timeout=30) as client:
+        public_key_response = client.get(f"{base_url}/public-key")
+        public_key_response.raise_for_status()
+        public_key_payload = public_key_response.json()
+
+        encrypted_value = encrypt_github_secret(
+            str(public_key_payload["key"]),
+            secret_value,
+        )
+        update_response = client.put(
+            f"{base_url}/MONITOR_URLS_JSON",
+            json={
+                "encrypted_value": encrypted_value,
+                "key_id": public_key_payload["key_id"],
+            },
+        )
+        update_response.raise_for_status()
+
+
+def is_allowed_telegram_user(message: dict[str, object]) -> bool:
+    sender = message.get("from")
+    if not isinstance(sender, dict):
+        return False
+
+    sender_id = sender.get("id")
+    allowed_id = TELEGRAM_ALLOWED_USER_ID or TELEGRAM_CHAT_ID
+    return bool(allowed_id) and str(sender_id) == allowed_id
+
+
+def add_urls_from_telegram_messages(
+    configs: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    offset = load_telegram_offset()
+    updates = fetch_telegram_updates(offset)
+    if not updates:
+        return configs
+
+    existing_urls = {normalize_url(str(config["url"])) for config in configs}
+    new_configs = list(configs)
+    urls_to_add: list[str] = []
+    max_processed_update_id = offset
+
+    for update in updates:
+        update_id = update.get("update_id")
+        if not isinstance(update_id, int) or update_id <= offset:
+            continue
+
+        message = update.get("message")
+        if not isinstance(message, dict):
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        text = message.get("text")
+        if not isinstance(text, str):
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        if not is_allowed_telegram_user(message):
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        url = extract_first_url(text)
+        if not url:
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        if url in existing_urls:
+            try_send_telegram(
+                f"ℹ️ URL ya existia\n\n🔗 URL: {url}\n\nNo se ha añadido de nuevo."
+            )
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+        if url in urls_to_add:
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        urls_to_add.append(url)
+        max_processed_update_id = max(max_processed_update_id, update_id)
+
+    if not urls_to_add:
+        save_telegram_offset(max_processed_update_id)
+        return configs
+
+    for url in urls_to_add:
+        new_configs.append(
+            {
+                "name": build_auto_name_from_url(url),
+                "url": url,
+                "mode": "auto",
+            }
+        )
+
+    try:
+        update_monitor_urls_secret(new_configs)
+    except Exception as exc:
+        detail = clean_error_detail(exc)
+        for url in urls_to_add:
+            try_send_telegram(
+                f"⚠️ No se pudo añadir la URL\n\n🔗 URL: {url}\n\n🧾 Detalle: {detail}"
+            )
+        print(
+            "No se pudo actualizar MONITOR_URLS_JSON. "
+            "No se avanza el offset de Telegram para poder reintentar.",
+            file=sys.stderr,
+        )
+        return configs
+
+    for url in urls_to_add:
+        try_send_telegram(
+            f"✅ URL añadida\n\n"
+            f"🏷️ Nombre: {build_auto_name_from_url(url)}\n"
+            f"🔗 URL: {url}\n\n"
+            "Se monitorizara en modo auto."
+        )
+
+    save_telegram_offset(max_processed_update_id)
+    return new_configs
 
 
 def format_response_status(
@@ -624,14 +863,27 @@ def main() -> int:
     now_utc = datetime.now(timezone.utc)
     now_madrid = now_utc.astimezone(MADRID_TIMEZONE)
 
+    url_configs = load_url_configs()
+    try:
+        url_configs = add_urls_from_telegram_messages(url_configs)
+    except Exception as exc:
+        detail = clean_error_detail(exc)
+        print(
+            "No se pudieron revisar los mensajes de Telegram.",
+            file=sys.stderr,
+        )
+        if debug_mode:
+            try_send_telegram(
+                "⚠️ No se pudieron revisar los mensajes de Telegram\n\n"
+                f"🧾 Detalle: {detail}"
+            )
+
     if not debug_mode and not is_monitoring_window(now_madrid):
         print(
             "Fuera de ventana de monitorizacion "
             f"({now_madrid.isoformat()}). Ejecucion normal finalizada sin monitorizar."
         )
         return 0
-
-    url_configs = load_url_configs()
 
     results = []
     debug_items: list[dict[str, object]] = []

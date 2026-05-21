@@ -9,11 +9,13 @@ Las URLs no estan escritas en el codigo ni en el README. Se guardan en GitHub Se
 1. cron-job.org lanza el workflow de GitHub Actions cada 15 minutos en modo `normal`.
 2. GitHub Actions ejecuta `monitor.py`.
 3. El script lee las URLs desde el secret `MONITOR_URLS_JSON`.
-4. Cada pagina se descarga primero por HTTP normal y, si hace falta, con Chromium mediante Playwright.
-5. Si una pagina cambia, el bot envia un resumen por Telegram.
-6. En modo `debug`, si una pagina se lee correctamente, el bot envia un `.txt` individual con el texto extraido.
-7. En modo `normal`, el bot solo envia `.txt` si esa pagina ha cambiado.
-8. Si una pagina falla, el bot registra el error y continua con las demas.
+4. Revisa si has enviado URLs nuevas al chat de Telegram.
+5. Si hay URLs nuevas, actualiza el secret `MONITOR_URLS_JSON` y las añade a la monitorizacion.
+6. Cada pagina se descarga primero por HTTP normal y, si hace falta, con Chromium mediante Playwright.
+7. Si una pagina cambia, el bot envia un resumen por Telegram.
+8. En modo `debug`, si una pagina se lee correctamente, el bot envia un `.txt` individual con el texto extraido.
+9. En modo `normal`, el bot solo envia `.txt` si esa pagina ha cambiado.
+10. Si una pagina falla, el bot registra el error y continua con las demas.
 
 ## Archivos importantes
 
@@ -32,12 +34,13 @@ Entra en tu repositorio:
 Settings > Secrets and variables > Actions > New repository secret
 ```
 
-Crea estos tres secrets:
+Crea estos secrets:
 
 ```text
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
 MONITOR_URLS_JSON
+GH_SECRETS_PAT
 ```
 
 `TELEGRAM_BOT_TOKEN` es el token del bot de Telegram.
@@ -76,6 +79,36 @@ Campos:
 - `strict_expected_terms`: opcional. Si es `true`, la pagina se considera error si no aparecen esas palabras.
 - `mode`: opcional. Usa `manual_summary` para webs que no deben abrirse automaticamente.
 - `summary`: opcional. Texto fijo de referencia para webs en modo `manual_summary`.
+
+`GH_SECRETS_PAT` permite que el bot actualice el secret `MONITOR_URLS_JSON` cuando le mandes una URL nueva por Telegram. Debe ser un fine-grained personal access token limitado al repositorio `monica-calderon/monitor-urls`, con permiso `Secrets: Read and write`.
+
+Opcionalmente puedes crear:
+
+```text
+TELEGRAM_ALLOWED_USER_ID
+```
+
+Si no lo configuras, el bot usa `TELEGRAM_CHAT_ID` como usuario permitido. En chats privados suele ser suficiente. En grupos, configura `TELEGRAM_ALLOWED_USER_ID` con tu ID real de Telegram.
+
+## Anadir URLs desde Telegram
+
+Puedes mandar una URL al chat del bot:
+
+```text
+https://ejemplo.com/pagina-nueva
+```
+
+En la siguiente ejecucion, el bot:
+
+- Comprueba que el mensaje lo has enviado tu.
+- Comprueba que el texto contiene una URL `http://` o `https://`.
+- Comprueba que la URL no estaba ya en `MONITOR_URLS_JSON`.
+- Crea un nombre automatico desde el dominio, por ejemplo `ejemplo-com`.
+- La añade con `mode: "auto"`.
+- Actualiza el secret `MONITOR_URLS_JSON`.
+- Te responde por Telegram con `✅ URL añadida`, `ℹ️ URL ya existia` o `⚠️ No se pudo añadir la URL`.
+
+El ultimo mensaje procesado se guarda en `.monitor_state/telegram_update_offset.txt`, usando la misma cache de estado del workflow.
 
 ## Webs con revision manual
 
@@ -121,6 +154,7 @@ La primera ejecucion crea una base inicial. En `normal` puede no enviar resumen 
 
 - Es el modo usado por cron-job.org.
 - Solo monitoriza entre las 08:00 y las 22:00, hora de Madrid.
+- Revisa mensajes nuevos de Telegram incluso fuera de ese horario.
 - Si una web no cambia, no envia `.txt`.
 - Si una web cambia, envia alerta con `Antes` y `Despues`, y adjunta el `.txt`.
 - Si hay errores, solo envia recordatorio si la ejecucion ocurre entre las 12:00 y las 12:15.
@@ -245,6 +279,8 @@ Prueba sin enviar nada real a Telegram:
 $env:MONITOR_URLS_JSON = '[{"name":"Nombre pagina","url":"https://ejemplo.com","expected_terms":["ejemplo"]}]'
 $env:DRY_RUN = "1"
 $env:ACTION_TO_RUN = "debug"
+$env:TELEGRAM_UPDATES_JSON = '[{"update_id":1,"message":{"from":{"id":12345},"text":"https://ejemplo.com/nueva"}}]'
+$env:TELEGRAM_CHAT_ID = "12345"
 python monitor.py
 ```
 
@@ -261,7 +297,11 @@ python dump_urls_text.py
 
 No cambies `monitor.py` para anadir URLs.
 
-Cambia el secret `MONITOR_URLS_JSON` en GitHub:
+Opcion recomendada: envia la URL al chat de Telegram del bot y espera a la siguiente ejecucion.
+
+Opcion manual: cambia el secret `MONITOR_URLS_JSON` en GitHub.
+
+Cambio manual:
 
 ```text
 Settings > Secrets and variables > Actions > MONITOR_URLS_JSON
