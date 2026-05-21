@@ -41,6 +41,7 @@ TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
 MONITOR_URLS_JSON
 GH_SECRETS_PAT
+MONITOR_STATE_JSON
 ```
 
 `TELEGRAM_BOT_TOKEN` es el token del bot de Telegram.
@@ -81,6 +82,14 @@ Campos:
 - `summary`: opcional. Texto fijo de referencia para webs en modo `manual_summary`.
 
 `GH_SECRETS_PAT` permite que el bot actualice el secret `MONITOR_URLS_JSON` cuando le mandes una URL nueva por Telegram. Debe ser un fine-grained personal access token limitado al repositorio `monica-calderon/monitor-urls`, con permiso `Secrets: Read and write`.
+
+`MONITOR_STATE_JSON` guarda hashes privados del ultimo texto correcto visto en cada web. Crealo inicialmente con este valor:
+
+```json
+{}
+```
+
+El bot lo actualiza al final de cada monitorizacion correcta. Esto evita repetir el mismo aviso de cambio aunque la cache de GitHub Actions tarde en restaurarse o falle.
 
 Opcionalmente puedes crear:
 
@@ -158,6 +167,7 @@ La primera ejecucion crea una base inicial. En `normal` puede no enviar resumen 
 - Si una web no cambia, no envia `.txt`.
 - Si una web cambia, envia alerta con `Antes` y `Despues`, y adjunta el `.txt`.
 - Si hay errores, solo envia recordatorio si la ejecucion ocurre entre las 12:00 y las 12:15.
+- Al final, actualiza `MONITOR_STATE_JSON` con el estado actual de las webs leidas correctamente.
 
 `debug`:
 
@@ -166,6 +176,7 @@ La primera ejecucion crea una base inicial. En `normal` puede no enviar resumen 
 - Al final de la ejecucion, envia un unico `Resumen debug` con todas las URLs, metodo, estado y codigo de respuesta si existe.
 - Envia `.txt` de todas las webs leidas correctamente.
 - Informa tambien de URLs en `manual_summary`.
+- Tambien actualiza `MONITOR_STATE_JSON`, igual que `normal`.
 
 ## Configurar cron-job.org cada 15 minutos
 
@@ -314,6 +325,7 @@ Despues ejecuta `Run workflow` para probarlo.
 - Las URLs no estan en el codigo.
 - Las URLs no estan en el README.
 - Las URLs estan en `MONITOR_URLS_JSON`.
+- Los hashes del ultimo estado estan en `MONITOR_STATE_JSON`.
 - Los logs publicos ocultan la URL cuando hay errores.
 - Los mensajes privados de Telegram y los `.txt` si incluyen la URL.
 
@@ -328,5 +340,6 @@ Si algun dia cambias el repositorio a `Private`, revisa el consumo de minutos de
 ## Notas
 
 - Idealista puede bloquear el acceso automatico con verificacion de dispositivo. Usa `mode: "manual_summary"` o solicita acceso a la Search API oficial.
-- El estado se guarda con cache de GitHub Actions. Si GitHub borra la cache, la siguiente ejecucion creara una nueva base inicial.
+- El texto anterior se guarda con cache de GitHub Actions para poder mostrar `Antes` y `Despues`.
+- Los hashes se guardan tambien en `MONITOR_STATE_JSON`, para evitar repetir alertas de cambios ya procesados.
 - Si cron-job.org deja de ejecutar, revisa que el token de GitHub no haya caducado.

@@ -63,4 +63,5 @@ jobs:
           TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
           GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
           MONITOR_URLS_JSON: ${{ secrets.MONITOR_URLS_JSON }}
+          MONITOR_STATE_JSON: ${{ secrets.MONITOR_STATE_JSON }}
         run: python monitor.py

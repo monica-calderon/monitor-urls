@@ -30,12 +30,15 @@ TELEGRAM_ALLOWED_USER_ID = os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip()
 GH_SECRETS_PAT = os.getenv("GH_SECRETS_PAT", "").strip()
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "monica-calderon/monitor-urls").strip()
 TELEGRAM_UPDATES_JSON = os.getenv("TELEGRAM_UPDATES_JSON", "").strip()
+MONITOR_STATE_JSON = os.getenv("MONITOR_STATE_JSON", "").strip()
 DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes", "si"}
 ACTION_TO_RUN = os.getenv("ACTION_TO_RUN", "normal").strip().lower()
 MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
 MADRID_TIMEZONE = ZoneInfo("Europe/Madrid")
 TELEGRAM_OFFSET_PATH = STATE_DIR / "telegram_update_offset.txt"
 URL_PATTERN = re.compile(r"https?://[^\s<>()\"']+", re.IGNORECASE)
+URLS_SECRET_NAME = "MONITOR_URLS_JSON"
+STATE_SECRET_NAME = "MONITOR_STATE_JSON"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -314,6 +317,27 @@ def save_current(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def load_state_hashes() -> dict[str, str]:
+    if not MONITOR_STATE_JSON:
+        return {}
+
+    try:
+        payload = json.loads(MONITOR_STATE_JSON)
+    except json.JSONDecodeError:
+        print("MONITOR_STATE_JSON no contiene JSON valido. Se ignora.", file=sys.stderr)
+        return {}
+
+    if not isinstance(payload, dict):
+        print("MONITOR_STATE_JSON no es un objeto JSON. Se ignora.", file=sys.stderr)
+        return {}
+
+    hashes = {}
+    for key, value in payload.items():
+        if isinstance(key, str) and isinstance(value, str):
+            hashes[key] = value
+    return hashes
+
+
 def make_before_after_summary(old: str, new: str, max_lines: int = 18) -> tuple[str, str]:
     before_lines = []
     after_lines = []
@@ -491,16 +515,21 @@ def encrypt_github_secret(public_key_value: str, secret_value: str) -> str:
     return base64.b64encode(encrypted).decode("utf-8")
 
 
-def update_monitor_urls_secret(configs: list[dict[str, object]]) -> None:
+def update_github_secret(
+    secret_name: str,
+    secret_value: str,
+    dry_run_detail: str = "",
+) -> None:
     if DRY_RUN:
         print("\n--- ACTUALIZACION SECRET DRY_RUN ---")
-        print(f"Secret: MONITOR_URLS_JSON")
-        print(f"URLs totales: {len(configs)}")
+        print(f"Secret: {secret_name}")
+        if dry_run_detail:
+            print(dry_run_detail)
         print("--- FIN ACTUALIZACION SECRET ---\n")
         return
 
     if not GH_SECRETS_PAT:
-        raise RuntimeError("Falta GH_SECRETS_PAT para actualizar MONITOR_URLS_JSON.")
+        raise RuntimeError(f"Falta GH_SECRETS_PAT para actualizar {secret_name}.")
     if not GITHUB_REPOSITORY or "/" not in GITHUB_REPOSITORY:
         raise RuntimeError("GITHUB_REPOSITORY no tiene formato owner/repo.")
 
@@ -509,7 +538,6 @@ def update_monitor_urls_secret(configs: list[dict[str, object]]) -> None:
         "Authorization": f"Bearer {GH_SECRETS_PAT}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    secret_value = json.dumps(configs, ensure_ascii=False, indent=2)
     base_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets"
 
     with httpx.Client(headers=headers, timeout=30) as client:
@@ -522,13 +550,27 @@ def update_monitor_urls_secret(configs: list[dict[str, object]]) -> None:
             secret_value,
         )
         update_response = client.put(
-            f"{base_url}/MONITOR_URLS_JSON",
+            f"{base_url}/{secret_name}",
             json={
                 "encrypted_value": encrypted_value,
                 "key_id": public_key_payload["key_id"],
             },
         )
         update_response.raise_for_status()
+
+
+def update_monitor_urls_secret(configs: list[dict[str, object]]) -> None:
+    secret_value = json.dumps(configs, ensure_ascii=False, indent=2)
+    update_github_secret(URLS_SECRET_NAME, secret_value, f"URLs totales: {len(configs)}")
+
+
+def update_monitor_state_secret(state_hashes: dict[str, str]) -> None:
+    secret_value = json.dumps(state_hashes, ensure_ascii=False, indent=2, sort_keys=True)
+    update_github_secret(
+        STATE_SECRET_NAME,
+        secret_value,
+        f"Estados totales: {len(state_hashes)}",
+    )
 
 
 def is_allowed_telegram_user(message: dict[str, object]) -> bool:
@@ -795,10 +837,15 @@ def handle_manual_summary(
     }
 
 
-def process_url(config: dict[str, object], checked_at: datetime) -> dict[str, object]:
+def process_url(
+    config: dict[str, object],
+    checked_at: datetime,
+    state_hashes: dict[str, str],
+) -> dict[str, object]:
     name = str(config["name"])
     url = str(config["url"])
-    state_path = STATE_DIR / f"{slugify(name)}.txt"
+    state_key = slugify(name)
+    state_path = STATE_DIR / f"{state_key}.txt"
 
     result = fetch_page(config)
     current_text = canonical_text(result.text)
@@ -806,33 +853,38 @@ def process_url(config: dict[str, object], checked_at: datetime) -> dict[str, ob
     save_current(state_path, current_text)
 
     current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+    previous_hash = state_hashes.get(state_key)
 
-    if previous is None:
+    if previous_hash is None and previous is None:
         return {
             "name": name,
             "status": "baseline",
             "method": result.method,
             "hash": current_hash,
+            "state_key": state_key,
             "status_code": result.status_code,
             "status_message": result.status_message,
             "_url": url,
             "_text": result.text,
         }
 
-    previous_hash = hashlib.sha256(previous.encode("utf-8")).hexdigest()
+    if previous_hash is None and previous is not None:
+        previous_hash = hashlib.sha256(previous.encode("utf-8")).hexdigest()
+
     if previous_hash == current_hash:
         return {
             "name": name,
             "status": "unchanged",
             "method": result.method,
             "hash": current_hash,
+            "state_key": state_key,
             "status_code": result.status_code,
             "status_message": result.status_message,
             "_url": url,
             "_text": result.text,
         }
 
-    before, after = make_before_after_summary(previous, current_text)
+    before, after = make_before_after_summary(previous or "", current_text)
     message = (
         f"🔔 Cambio detectado\n\n"
         f"🏷️ Web: {name}\n"
@@ -849,6 +901,7 @@ def process_url(config: dict[str, object], checked_at: datetime) -> dict[str, ob
         "status": "changed",
         "method": result.method,
         "hash": current_hash,
+        "state_key": state_key,
         "status_code": result.status_code,
         "status_message": result.status_message,
         "_url": url,
@@ -885,6 +938,9 @@ def main() -> int:
         )
         return 0
 
+    state_hashes = load_state_hashes()
+    updated_state_hashes = dict(state_hashes)
+    state_has_changes = False
     results = []
     debug_items: list[dict[str, object]] = []
 
@@ -911,10 +967,15 @@ def main() -> int:
                         )
                     continue
 
-                result = process_url(config, now_madrid)
+                result = process_url(config, now_madrid, state_hashes)
 
                 url = str(result.pop("_url"))
                 text = str(result.pop("_text"))
+                state_key = str(result.pop("state_key"))
+                current_hash = str(result["hash"])
+                if updated_state_hashes.get(state_key) != current_hash:
+                    updated_state_hashes[state_key] = current_hash
+                    state_has_changes = True
                 print(json.dumps(result, ensure_ascii=False))
                 results.append(result)
 
@@ -974,6 +1035,21 @@ def main() -> int:
                         + telegram_error_message
                     )
                 results.append({"name": name, "status": "error", "error": str(exc)})
+
+    if state_has_changes:
+        try:
+            update_monitor_state_secret(updated_state_hashes)
+        except Exception as exc:
+            print(
+                "No se pudo actualizar MONITOR_STATE_JSON. "
+                "La cache local sigue guardando los textos, pero puede repetirse algun aviso.",
+                file=sys.stderr,
+            )
+            if debug_mode:
+                try_send_telegram(
+                    "⚠️ No se pudo actualizar el estado privado de monitorizacion\n\n"
+                    f"🧾 Detalle: {clean_error_detail(exc)}"
+                )
 
     if debug_mode:
         send_debug_summary(now_madrid, debug_items)
