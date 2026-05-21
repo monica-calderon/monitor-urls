@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Iterable
 
 import httpx
@@ -21,6 +22,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes", "si"}
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "15"))
+MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -328,6 +330,33 @@ def send_telegram(message: str) -> None:
             response.raise_for_status()
 
 
+def send_telegram_document(path: Path, caption: str) -> None:
+    if DRY_RUN:
+        preview = path.read_text(encoding="utf-8", errors="replace")[:1200]
+        print("\n--- DOCUMENTO TELEGRAM DRY_RUN ---")
+        print(f"Archivo: {path.name}")
+        print(f"Caption: {caption}")
+        print("Vista previa:")
+        print(preview)
+        print("--- FIN DOCUMENTO ---\n")
+        return
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram no configurado: faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
+        print(f"No se envio el documento {path.name}")
+        return
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    with httpx.Client(timeout=60) as client:
+        with path.open("rb") as document:
+            response = client.post(
+                api_url,
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
+                files={"document": (path.name, document, "text/plain")},
+            )
+            response.raise_for_status()
+
+
 def try_send_telegram(message: str) -> None:
     try:
         send_telegram(message)
@@ -339,10 +368,66 @@ def try_send_telegram(message: str) -> None:
         )
 
 
+def try_send_telegram_document(path: Path, caption: str) -> None:
+    try:
+        send_telegram_document(path, caption)
+    except Exception as exc:
+        print(f"No se pudo enviar el documento de Telegram: {exc}", file=sys.stderr)
+        print(
+            "El documento no se muestra en logs para no publicar URLs privadas.",
+            file=sys.stderr,
+        )
+
+
 def clean_error_detail(error: Exception) -> str:
     detail = str(error).splitlines()[0]
     detail = detail.split(" | browser:", 1)[0]
     return re.sub(r" for url 'https?://[^']+'$", "", detail)
+
+
+def make_text_file_content(
+    name: str,
+    url: str,
+    method: str,
+    status: str,
+    checked_at: datetime,
+    text: str,
+) -> str:
+    content = (
+        f"Nombre: {name}\n"
+        f"URL: {url}\n"
+        f"Metodo usado: {method}\n"
+        f"Estado: {status}\n"
+        f"Fecha UTC: {checked_at.isoformat()}\n\n"
+        f"Texto extraido:\n{text}\n"
+    )
+    encoded = content.encode("utf-8")
+    if len(encoded) <= MAX_TEXT_FILE_BYTES:
+        return content
+
+    suffix = (
+        "\n\n[Texto recortado porque el archivo era demasiado grande "
+        "para enviarlo de forma estable por Telegram.]\n"
+    )
+    suffix_bytes = suffix.encode("utf-8")
+    allowed = MAX_TEXT_FILE_BYTES - len(suffix_bytes)
+    truncated = encoded[:allowed].decode("utf-8", errors="ignore")
+    return truncated + suffix
+
+
+def write_text_report(
+    directory: Path,
+    name: str,
+    url: str,
+    method: str,
+    status: str,
+    checked_at: datetime,
+    text: str,
+) -> Path:
+    path = directory / f"{slugify(name)}.txt"
+    content = make_text_file_content(name, url, method, status, checked_at, text)
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 def process_url(config: dict[str, object]) -> dict[str, object]:
@@ -363,6 +448,8 @@ def process_url(config: dict[str, object]) -> dict[str, object]:
             "status": "baseline",
             "method": result.method,
             "hash": current_hash,
+            "_url": url,
+            "_text": result.text,
         }
 
     previous_hash = hashlib.sha256(previous.encode("utf-8")).hexdigest()
@@ -372,6 +459,8 @@ def process_url(config: dict[str, object]) -> dict[str, object]:
             "status": "unchanged",
             "method": result.method,
             "hash": current_hash,
+            "_url": url,
+            "_text": result.text,
         }
 
     summary = make_diff_summary(previous, current_text)
@@ -385,10 +474,11 @@ def process_url(config: dict[str, object]) -> dict[str, object]:
 
     return {
         "name": name,
-        "url": url,
         "status": "changed",
         "method": result.method,
         "hash": current_hash,
+        "_url": url,
+        "_text": result.text,
     }
 
 
@@ -403,29 +493,49 @@ def main() -> int:
 
     results = []
 
-    for config in url_configs:
-        name = str(config["name"])
-        try:
-            print(f"Revisando: {name}")
-            result = process_url(config)
-            print(json.dumps(result, ensure_ascii=False))
-            results.append(result)
-        except Exception as exc:
-            telegram_error_message = (
-                f"Error monitorizando {name}\n\n"
-                f"URL: {config['url']}\n\n"
-                f"Detalle: {clean_error_detail(exc)}\n\n"
-                "El bot continua con el resto de paginas."
-            )
-            log_error_message = (
-                f"Error monitorizando {name}\n\n"
-                "URL: oculta en logs publicos\n\n"
-                f"Detalle: {clean_error_detail(exc)}\n\n"
-                "El bot continua con el resto de paginas."
-            )
-            print(log_error_message, file=sys.stderr)
-            try_send_telegram(telegram_error_message)
-            results.append({"name": name, "status": "error", "error": str(exc)})
+    with TemporaryDirectory() as temp_dir:
+        report_dir = Path(temp_dir)
+
+        for config in url_configs:
+            name = str(config["name"])
+            try:
+                print(f"Revisando: {name}")
+                result = process_url(config)
+
+                url = str(result.pop("_url"))
+                text = str(result.pop("_text"))
+                print(json.dumps(result, ensure_ascii=False))
+                results.append(result)
+
+                report_path = write_text_report(
+                    report_dir,
+                    name,
+                    url,
+                    str(result["method"]),
+                    str(result["status"]),
+                    now,
+                    text,
+                )
+                try_send_telegram_document(
+                    report_path,
+                    f"Texto extraido de {name} ({result['status']})",
+                )
+            except Exception as exc:
+                telegram_error_message = (
+                    f"Error monitorizando {name}\n\n"
+                    f"URL: {config['url']}\n\n"
+                    f"Detalle: {clean_error_detail(exc)}\n\n"
+                    "El bot continua con el resto de paginas."
+                )
+                log_error_message = (
+                    f"Error monitorizando {name}\n\n"
+                    "URL: oculta en logs publicos\n\n"
+                    f"Detalle: {clean_error_detail(exc)}\n\n"
+                    "El bot continua con el resto de paginas."
+                )
+                print(log_error_message, file=sys.stderr)
+                try_send_telegram(telegram_error_message)
+                results.append({"name": name, "status": "error", "error": str(exc)})
 
     print("\nResumen final:")
     print(json.dumps(results, ensure_ascii=False, indent=2))

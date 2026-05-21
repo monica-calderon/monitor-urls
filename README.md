@@ -1,6 +1,6 @@
 # Monitor de URLs con Telegram
 
-Este proyecto revisa varias paginas web cada 15 minutos y avisa por Telegram si cambia el texto.
+Este proyecto revisa varias paginas web cada 15 minutos, avisa por Telegram si cambia el texto y envia un archivo `.txt` por cada pagina leida correctamente.
 
 Esta pensado para funcionar gratis con GitHub Actions en un repositorio publico. No necesitas tener tu ordenador encendido.
 
@@ -17,7 +17,7 @@ Idealista puede mostrar verificacion de dispositivo. El script intenta abrir la 
 - `monitor.py`: el bot que revisa las paginas y envia mensajes.
 - `dump_urls_text.py`: archivo de prueba para imprimir el texto que se extrae de las paginas.
 - `requirements.txt`: librerias de Python necesarias.
-- `.github/workflows/monitor.yml`: automatizacion de GitHub Actions cada 15 minutos.
+- `.github/workflows/monitor.yml`: workflow de GitHub Actions que se lanza manualmente o desde cron-job.org.
 - `.monitor_state/`: carpeta donde se guarda el ultimo texto conocido. No se sube a GitHub.
 
 ## Paso 1: crear un repositorio publico en GitHub
@@ -101,19 +101,43 @@ La primera ejecucion guarda una base inicial. Normalmente no envia aviso de camb
 
 ## Paso 5: funcionamiento automatico
 
-Despues de subirlo a GitHub, el workflow intenta arrancar automaticamente cada 5 minutos.
+GitHub Actions no garantiza que los workflows programados se ejecuten exactamente cada 15 minutos. Para hacerlo mas fiable, usa cron-job.org para lanzar el workflow por API cada 15 minutos.
 
-El horario configurado es:
+El workflow conserva `workflow_dispatch`, que permite lanzarlo desde fuera con una peticion HTTP.
 
-```yaml
-- cron: "*/5 * * * *"
+En cron-job.org crea un cron job asi:
+
+- Metodo: `POST`
+- URL:
+
+```text
+https://api.github.com/repos/monica-calderon/monitor-urls/actions/workflows/monitor.yml/dispatches
 ```
 
-Dentro del script hay un control para escanear solo si han pasado 15 minutos desde el ultimo escaneo real. Esto da mas oportunidades a GitHub Actions de arrancar el workflow si alguna ejecucion programada se retrasa o se omite, pero evita revisar las webs mas de la cuenta.
+- Headers:
+
+```text
+Accept: application/vnd.github+json
+Authorization: Bearer TU_GITHUB_TOKEN
+X-GitHub-Api-Version: 2022-11-28
+Content-Type: application/json
+```
+
+- Body:
+
+```json
+{
+  "ref": "main"
+}
+```
+
+El token de GitHub debe ser un token fino con permiso solo para este repositorio y con `Actions: Read and write`.
 
 Si una pagina cambia, recibiras un mensaje de Telegram con un resumen.
 
 Si una pagina falla, por ejemplo porque Idealista pide verificacion, recibiras un mensaje de error y el bot seguira con las demas.
+
+Despues de cada pagina leida correctamente, recibiras tambien un archivo `.txt` con el nombre de esa web y el texto extraido.
 
 ## Control del limite gratuito
 
@@ -125,12 +149,8 @@ Calculo aproximado:
 
 - Cada 15 minutos son unas 96 ejecuciones al dia.
 - En un repositorio publico, esas ejecuciones no consumen los minutos gratuitos de repositorios privados.
-- El workflow intenta arrancar cada 5 minutos para mejorar la fiabilidad, pero el script solo escanea cada 15 minutos gracias a `SCAN_INTERVAL_MINUTES`.
-- Si algun dia cambias el repositorio a `Private`, este intervalo podria consumir demasiados minutos. En ese caso cambia el cron de `.github/workflows/monitor.yml` a una frecuencia mayor, por ejemplo cada 6 horas:
-
-```yaml
-- cron: "0 */6 * * *"
-```
+- cron-job.org es gratuito y permite ejecutar cron jobs con intervalos personalizados.
+- Si algun dia cambias el repositorio a `Private`, revisa el consumo de minutos de GitHub Actions.
 
 ## Probar en tu ordenador
 
@@ -146,7 +166,7 @@ $env:DRY_RUN = "1"
 python monitor.py
 ```
 
-Con `DRY_RUN=1`, el script no envia mensajes reales a Telegram. Solo los muestra por pantalla.
+Con `DRY_RUN=1`, el script no envia mensajes ni archivos reales a Telegram. Solo los muestra por pantalla con una vista previa.
 
 Para probar el envio real localmente:
 
@@ -191,7 +211,7 @@ Si una pagina es dificil y quieres exigir que aparezcan esas palabras, anade:
 ## Notas importantes
 
 - GitHub Actions gratis funciona muy bien para este caso si el repositorio es publico.
-- GitHub no garantiza que el minuto exacto sea siempre perfecto; puede haber retrasos o alguna ejecucion omitida si hay mucha carga.
+- GitHub no garantiza que el minuto exacto sea siempre perfecto; por eso el disparador recomendado es cron-job.org.
 - El estado se guarda con cache de GitHub Actions. Si GitHub borra la cache, la siguiente ejecucion creara una nueva base inicial.
 - El token de Telegram y las URLs deben estar solo en GitHub Secrets o en variables de entorno locales.
 - Los logs publicos no muestran las URLs cuando hay error; el mensaje privado de Telegram si incluye la URL.

@@ -1,9 +1,10 @@
 name: Monitor URLs
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
+  repository_dispatch:
+    types:
+      - monitor-urls
 
 permissions:
   contents: read
@@ -11,7 +12,6 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  SCAN_INTERVAL_MINUTES: 15
 
 concurrency:
   group: monitor-urls
