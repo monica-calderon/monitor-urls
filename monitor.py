@@ -67,6 +67,8 @@ NOISE_TAGS = [
     "noscript",
     "svg",
     "iframe",
+]
+STRUCTURAL_NOISE_TAGS = [
     "header",
     "nav",
     "footer",
@@ -122,6 +124,7 @@ NOISE_LINES = {
     "aceptar cookies",
     "configurar cookies",
 }
+MIN_MAIN_TEXT_LENGTH = 200
 
 
 @dataclass
@@ -226,10 +229,13 @@ def save_telegram_offset(offset: int) -> None:
     TELEGRAM_OFFSET_PATH.write_text(str(offset), encoding="utf-8")
 
 
-def clean_text(html: str | bytes) -> str:
-    soup = BeautifulSoup(html, "html.parser")
-
+def remove_basic_noise(soup: BeautifulSoup) -> None:
     for tag in soup(NOISE_TAGS):
+        tag.decompose()
+
+
+def remove_structural_noise(soup: BeautifulSoup) -> None:
+    for tag in soup(STRUCTURAL_NOISE_TAGS):
         tag.decompose()
 
     for role in NOISE_ROLES:
@@ -264,14 +270,8 @@ def clean_text(html: str | bytes) -> str:
         if tag.parent is not None:
             tag.decompose()
 
-    content_root = None
-    for selector in MAIN_CONTENT_SELECTORS:
-        content_root = soup.select_one(selector)
-        if content_root is not None:
-            break
-    if content_root is None:
-        content_root = soup.body or soup
 
+def extract_lines_from_root(content_root: object) -> str:
     text = content_root.get_text("\n")
     lines = []
     for line in text.splitlines():
@@ -287,6 +287,34 @@ def clean_text(html: str | bytes) -> str:
         previous = line
 
     return "\n".join(deduplicated)
+
+
+def select_main_content_root(soup: BeautifulSoup) -> object:
+    content_root = None
+    for selector in MAIN_CONTENT_SELECTORS:
+        content_root = soup.select_one(selector)
+        if content_root is not None:
+            break
+    if content_root is None:
+        content_root = soup.body or soup
+    return content_root
+
+
+def clean_text(html: str | bytes) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    remove_basic_noise(soup)
+
+    broad_root = soup.body or soup
+    broad_text = extract_lines_from_root(broad_root)
+
+    focused_soup = BeautifulSoup(str(soup), "html.parser")
+    remove_structural_noise(focused_soup)
+    focused_root = select_main_content_root(focused_soup)
+    focused_text = extract_lines_from_root(focused_root)
+
+    if len(focused_text) >= MIN_MAIN_TEXT_LENGTH:
+        return focused_text
+    return broad_text
 
 
 def canonical_text(text: str) -> str:
