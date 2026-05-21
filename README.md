@@ -113,6 +113,8 @@ La primera ejecucion crea una base inicial. Puede no enviar resumen de cambios, 
 
 GitHub Actions no garantiza que `schedule` se ejecute exactamente cada 15 minutos. Por eso este proyecto usa cron-job.org para lanzar el workflow mediante API.
 
+Usa `repository_dispatch`, que es mas simple para cron-job.org que `workflow_dispatch` y evita errores comunes `422 Unprocessable Entity` por un `ref` o body mal formado.
+
 En cron-job.org crea un cron job:
 
 - Schedule: cada 15 minutos.
@@ -120,7 +122,7 @@ En cron-job.org crea un cron job:
 - URL:
 
 ```text
-https://api.github.com/repos/monica-calderon/monitor-urls/actions/workflows/monitor.yml/dispatches
+https://api.github.com/repos/monica-calderon/monitor-urls/dispatches
 ```
 
 Headers:
@@ -136,9 +138,17 @@ Body:
 
 ```json
 {
-  "ref": "main"
+  "event_type": "monitor-urls"
 }
 ```
+
+Respuesta esperada:
+
+```text
+204 No Content
+```
+
+Si ves `422 Unprocessable Entity`, revisa que el body sea JSON real, que `event_type` este escrito exactamente como `monitor-urls` y que cron-job.org envie `Content-Type: application/json`.
 
 ## Crear el token de GitHub para cron-job.org
 
@@ -152,8 +162,8 @@ Configuralo asi:
 
 - Repository access: solo `monica-calderon/monitor-urls`.
 - Permissions:
-  - `Actions`: `Read and write`.
-  - `Contents`: `Read-only`, si GitHub lo pide.
+  - `Contents`: `Read and write`.
+  - `Actions`: `Read-only`, si GitHub lo pide.
 - Caducidad: la que prefieras. Si caduca, cron-job.org dejara de lanzar el workflow.
 
 Copia el token y usalo en cron-job.org en el header:
