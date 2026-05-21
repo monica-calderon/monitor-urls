@@ -61,6 +61,60 @@ BLOCKED_MARKERS = [
     "robot",
 ]
 
+NOISE_TAGS = [
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "iframe",
+    "header",
+    "nav",
+    "footer",
+    "aside",
+]
+NOISE_ROLES = [
+    "navigation",
+    "banner",
+    "contentinfo",
+]
+NOISE_ATTR_PARTS = [
+    "menu",
+    "submenu",
+    "navbar",
+    "breadcrumb",
+    "cookie",
+    "modal",
+    "popup",
+    "footer",
+    "header",
+    "social",
+    "share",
+    "sidebar",
+]
+MAIN_CONTENT_SELECTORS = [
+    "main",
+    '[role="main"]',
+    "article",
+    ".content",
+    ".main",
+    ".property",
+    ".detail",
+    ".entry",
+    ".post",
+]
+NOISE_LINES = {
+    "toggle submenu",
+    "abrir menu",
+    "abrir menú",
+    "cerrar menu",
+    "cerrar menú",
+    "menu",
+    "menú",
+    "saltar al contenido",
+    "aceptar cookies",
+    "configurar cookies",
+}
+
 
 @dataclass
 class FetchResult:
@@ -167,14 +221,42 @@ def save_telegram_offset(offset: int) -> None:
 def clean_text(html: str | bytes) -> str:
     soup = BeautifulSoup(html, "html.parser")
 
-    for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
+    for tag in soup(NOISE_TAGS):
         tag.decompose()
 
-    text = soup.get_text("\n")
+    for role in NOISE_ROLES:
+        for tag in soup.select(f'[role="{role}"]'):
+            tag.decompose()
+
+    for tag in soup.find_all(True):
+        attr_values = []
+        tag_id = tag.get("id")
+        if isinstance(tag_id, str):
+            attr_values.append(tag_id)
+
+        classes = tag.get("class")
+        if isinstance(classes, list):
+            attr_values.extend(str(item) for item in classes)
+        elif isinstance(classes, str):
+            attr_values.append(classes)
+
+        joined_attrs = " ".join(attr_values).lower()
+        if any(noise in joined_attrs for noise in NOISE_ATTR_PARTS):
+            tag.decompose()
+
+    content_root = None
+    for selector in MAIN_CONTENT_SELECTORS:
+        content_root = soup.select_one(selector)
+        if content_root is not None:
+            break
+    if content_root is None:
+        content_root = soup.body or soup
+
+    text = content_root.get_text("\n")
     lines = []
     for line in text.splitlines():
         cleaned = re.sub(r"\s+", " ", line).strip()
-        if len(cleaned) >= 2:
+        if len(cleaned) >= 2 and cleaned.casefold() not in NOISE_LINES:
             lines.append(cleaned)
 
     deduplicated = []
