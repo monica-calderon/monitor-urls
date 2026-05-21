@@ -91,6 +91,14 @@ NOISE_ATTR_PARTS = [
     "share",
     "sidebar",
 ]
+MAIN_ATTR_VALUES = {
+    "content",
+    "main",
+    "property",
+    "detail",
+    "entry",
+    "post",
+}
 MAIN_CONTENT_SELECTORS = [
     "main",
     '[role="main"]',
@@ -228,7 +236,11 @@ def clean_text(html: str | bytes) -> str:
         for tag in soup.select(f'[role="{role}"]'):
             tag.decompose()
 
-    for tag in soup.find_all(True):
+    noisy_tags = []
+    for tag in list(soup.find_all(True)):
+        if tag.parent is None:
+            continue
+
         attr_values = []
         tag_id = tag.get("id")
         if isinstance(tag_id, str):
@@ -240,8 +252,16 @@ def clean_text(html: str | bytes) -> str:
         elif isinstance(classes, str):
             attr_values.append(classes)
 
-        joined_attrs = " ".join(attr_values).lower()
-        if any(noise in joined_attrs for noise in NOISE_ATTR_PARTS):
+        normalized_attrs = [value.lower() for value in attr_values]
+        if any(value in MAIN_ATTR_VALUES for value in normalized_attrs):
+            continue
+
+        joined_attrs = " ".join(normalized_attrs)
+        if joined_attrs and any(noise in joined_attrs for noise in NOISE_ATTR_PARTS):
+            noisy_tags.append(tag)
+
+    for tag in noisy_tags:
+        if tag.parent is not None:
             tag.decompose()
 
     content_root = None
