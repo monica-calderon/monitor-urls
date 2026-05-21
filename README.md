@@ -256,8 +256,8 @@ Por cada ejecucion real:
 
 - Los mensajes usan emojis y secciones visuales para distinguir cambios, errores, URLs manuales y archivos.
 - Si una web cambia: mensaje de alerta con `Antes` y `Despues`.
-- Si una web falla en `debug`: aparece en el `Resumen debug` final con la URL y el detalle seguro.
-- Si una web falla en `normal`: recordatorio solo entre las 12:00 y las 12:15.
+- Si una web falla en `debug`: aparece en el `Resumen debug` final con la URL y el detalle seguro. Si Playwright puede abrir algo, tambien envia un PNG con la captura visible de la pagina.
+- Si una web falla en `normal`: recordatorio solo entre las 12:00 y las 12:15. En esa misma ventana tambien intenta enviar la captura PNG del error.
 - Si una web se lee correctamente en `debug`: archivo `.txt` con nombre identificativo.
 - Si una web cambia en `normal`: archivo `.txt` con nombre identificativo.
 - Si una web esta en `manual_summary`: en `debug`, aparece en el resumen final; en `normal`, solo queda registrado en logs.
@@ -271,7 +271,7 @@ Cada `.txt` incluye:
 - Fecha Madrid.
 - Texto extraido.
 
-Las webs con error no generan `.txt`.
+Las webs con error no generan `.txt`. Las screenshots de error se guardan solo en una carpeta temporal durante la ejecucion y se envian unicamente por Telegram; no se suben como artifacts ni quedan en el repositorio.
 
 ## Probar en local
 

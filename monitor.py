@@ -676,13 +676,19 @@ def send_telegram(message: str) -> None:
 
 
 def send_telegram_document(path: Path, caption: str) -> None:
+    is_text_document = path.suffix.lower() == ".txt"
+    content_type = "text/plain" if is_text_document else "image/png"
+
     if DRY_RUN:
-        preview = path.read_text(encoding="utf-8", errors="replace")[:1200]
         print("\n--- DOCUMENTO TELEGRAM DRY_RUN ---")
         print(f"Archivo: {path.name}")
         print(f"Caption: {caption}")
-        print("Vista previa:")
-        print(preview)
+        if path.exists():
+            print(f"Tamaño aproximado: {path.stat().st_size} bytes")
+        if is_text_document:
+            preview = path.read_text(encoding="utf-8", errors="replace")[:1200]
+            print("Vista previa:")
+            print(preview)
         print("--- FIN DOCUMENTO ---\n")
         return
 
@@ -697,7 +703,7 @@ def send_telegram_document(path: Path, caption: str) -> None:
             response = client.post(
                 api_url,
                 data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
-                files={"document": (path.name, document, "text/plain")},
+                files={"document": (path.name, document, content_type)},
             )
             response.raise_for_status()
 
@@ -1067,6 +1073,37 @@ def write_text_report(
     return path
 
 
+def capture_error_screenshot(url: str, name: str, directory: Path) -> Path:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:  # pragma: no cover - depends on optional browser install
+        raise RuntimeError(
+            "Playwright no esta instalado o Chromium no esta disponible. "
+            "Ejecuta: python -m playwright install chromium"
+        ) from exc
+
+    path = directory / f"screenshot-{slugify(name)}.png"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent=USER_AGENT,
+            locale="es-ES",
+            viewport={"width": 1366, "height": 900},
+        )
+        try:
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                page.wait_for_timeout(3_000)
+            except Exception:
+                page.wait_for_timeout(1_000)
+            page.screenshot(path=str(path), full_page=True)
+        finally:
+            browser.close()
+
+    return path
+
+
 def handle_manual_summary(
     config: dict[str, object],
     notify_telegram: bool,
@@ -1270,16 +1307,38 @@ def main() -> int:
                         f"📄 Texto extraido de {name} ({result['status']})",
                     )
             except Exception as exc:
+                error_detail = clean_error_detail(exc)
+                should_send_error_screenshot = debug_mode or is_error_reminder_window(
+                    now_madrid
+                )
+                screenshot_detail = ""
+                if should_send_error_screenshot:
+                    try:
+                        screenshot_path = capture_error_screenshot(
+                            str(config["url"]),
+                            name,
+                            report_dir,
+                        )
+                        try_send_telegram_document(
+                            screenshot_path,
+                            f"🖼️ Screenshot de error: {name}",
+                        )
+                    except Exception as screenshot_exc:
+                        screenshot_detail = (
+                            " | No se pudo capturar screenshot: "
+                            f"{clean_error_detail(screenshot_exc)}"
+                        )
+
                 telegram_error_message = (
                     f"⚠️ Error monitorizando {name}\n\n"
                     f"🔗 URL: {config['url']}\n\n"
-                    f"🧾 Detalle: {clean_error_detail(exc)}\n\n"
+                    f"🧾 Detalle: {error_detail}{screenshot_detail}\n\n"
                     "✅ El bot continua con el resto de paginas."
                 )
                 log_error_message = (
                     f"Error monitorizando {name}\n\n"
                     "URL: oculta en logs publicos\n\n"
-                    f"Detalle: {clean_error_detail(exc)}\n\n"
+                    f"Detalle: {error_detail}{screenshot_detail}\n\n"
                     "El bot continua con el resto de paginas."
                 )
                 print(log_error_message, file=sys.stderr)
@@ -1290,7 +1349,7 @@ def main() -> int:
                             "url": str(config["url"]),
                             "status": "error",
                             "method": "error",
-                            "detail": clean_error_detail(exc),
+                            "detail": f"{error_detail}{screenshot_detail}",
                         }
                     )
                 elif is_error_reminder_window(now_madrid):
