@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Neinor Essence Homes II",
+    "url": "https://www.neinorhomes.com/promocion/essence-alovera-homes-ii/",
+    "expected_terms": ["essence", "alovera"],
+    "strict_expected_terms": true
+  },
+  {
+    "name": "Neinor Essence Homes I",
+    "url": "https://www.neinorhomes.com/promocion/essence-alovera-homes/",
+    "expected_terms": ["essence", "alovera"],
+    "strict_expected_terms": true
+  },
+  {
+    "name": "Idealista Essence Homes II",
+    "url": "https://www.idealista.com/obra-nueva/111262419/",
+    "expected_terms": ["essence", "alovera"],
+    "strict_expected_terms": true
+  },
+  {
+    "name": "Mi Primera Vivienda Madrid",
+    "url": "https://www.comunidad.madrid/vivienda/mi-primera-vivienda",
+    "expected_terms": ["vivienda"],
+    "strict_expected_terms": true
+  },
+  {
+    "name": "Ayudas Vivienda CLM",
+    "url": "https://vivienda.castillalamancha.es/ayudas-y-subvenciones",
+    "expected_terms": ["ayudas"],
+    "strict_expected_terms": true
+  },
+  {
+    "name": "Impulsa Vivienda CLM",
+    "url": "https://vivienda.castillalamancha.es/impulsa-vivienda",
+    "expected_terms": ["vivienda"],
+    "strict_expected_terms": true
+  }
+]

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+
 import difflib
 import base64
 import hashlib
@@ -46,6 +51,12 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+PLAYWRIGHT_PROFILE_DIR = Path(os.getenv("PLAYWRIGHT_PROFILE_DIR", ".playwright-profile"))
+HEADLESS = os.getenv("HEADLESS", "true").strip().lower() in {"1", "true", "yes", "si"}
+SLOW_MO_MS = int(os.getenv("SLOW_MO_MS", "0"))
+PAGE_LOAD_TIMEOUT_MS = int(os.getenv("PAGE_LOAD_TIMEOUT_MS", "60000"))
+
+
 BLOCKED_MARKERS = [
     "captcha",
     "checking your browser",
@@ -59,6 +70,10 @@ BLOCKED_MARKERS = [
     "demasiadas peticiones",
     "no eres un robot",
     "robot",
+    "se ha detectado un uso indebido",
+    "el acceso se ha bloqueado",
+    "no consigues pasar de aquí",
+    "no consigues pasar de aqui",
 ]
 
 NOISE_TAGS = [
@@ -474,45 +489,90 @@ def fetch_with_http(url: str) -> FetchResult:
 def fetch_with_browser_mode(url: str, java_script_enabled: bool) -> FetchResult:
     try:
         from playwright.sync_api import sync_playwright
+        from playwright_stealth import Stealth
     except Exception as exc:  # pragma: no cover - depends on optional browser install
         raise RuntimeError(
-            "Playwright no esta instalado o Chromium no esta disponible. "
-            "Ejecuta: python -m playwright install chromium"
+            "Playwright o playwright-stealth no estan instalados o Chromium no esta disponible. "
+            "Ejecuta: pip install playwright playwright-stealth && python -m playwright install chromium"
         ) from exc
 
+    method = "browser" if java_script_enabled else "browser_no_js"
+    title = ""
+    final_url = url
+    response_status: int | None = None
+
+    PLAYWRIGHT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
+        context = p.chromium.launch_persistent_context(
+            str(PLAYWRIGHT_PROFILE_DIR),
+            headless=HEADLESS,
+            slow_mo=SLOW_MO_MS,
             user_agent=USER_AGENT,
             locale="es-ES",
+            timezone_id="Europe/Madrid",
             viewport={"width": 1366, "height": 900},
             java_script_enabled=java_script_enabled,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
+
+        page = context.new_page()
+        Stealth().apply_stealth_sync(page)
+
         try:
-            response = page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(4_000)
+            response = page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=PAGE_LOAD_TIMEOUT_MS,
+            )
+            response_status = response.status if response else None
+            page.wait_for_timeout(8_000)
+
+            for selector in [
+                "button:has-text('Aceptar')",
+                "button:has-text('Aceptar todo')",
+                "button:has-text('Consentir')",
+                "button:has-text('Guardar configuración')",
+                "button:has-text('Guardar configuracion')",
+                "button:has-text('Rechazar')",
+            ]:
+                try:
+                    locator = page.locator(selector)
+                    if locator.count() > 0:
+                        locator.first.click(timeout=3_000)
+                        page.wait_for_timeout(2_000)
+                        break
+                except Exception:
+                    pass
+
+            for _ in range(5):
+                page.mouse.wheel(0, 1200)
+                page.wait_for_timeout(1_000)
+
+            title = page.title()
+            final_url = page.url
             html = page.content()
         finally:
-            browser.close()
+            context.close()
 
     text = extract_text_for_url(html, url)
-    method = "browser" if java_script_enabled else "browser_no_js"
-    detail = ""
-    if response and response.status >= 400 and has_useful_listing_content(text, url):
-        method = f"{method}_partial_{response.status}"
-        detail = (
-            "Se extrajo contenido util del HTML recibido aunque la respuesta "
-            f"fue {response.status}."
-        )
+    detail = f"Titulo: {title}. URL final: {final_url}. Longitud texto: {len(text)}."
+
+    if response_status and response_status >= 400 and has_useful_listing_content(text, url):
+        method = f"{method}_partial_{response_status}"
+        detail += f" Se extrajo contenido util aunque la respuesta fue {response_status}."
 
     return FetchResult(
         text=text,
         method=method,
-        status_code=response.status if response else None,
+        status_code=response_status,
         status_message="",
         detail=detail,
     )
-
 
 def fetch_with_browser(url: str) -> FetchResult:
     return fetch_with_browser_mode(url, java_script_enabled=True)
@@ -531,7 +591,12 @@ def fetch_page(config: dict[str, object]) -> FetchResult:
     errors = []
     results = []
 
-    for fetcher in (fetch_with_http, fetch_with_browser, fetch_with_browser_no_js):
+    if is_idealista_url(url):
+        fetchers = (fetch_with_browser, fetch_with_http)
+    else:
+        fetchers = (fetch_with_http, fetch_with_browser, fetch_with_browser_no_js)
+
+    for fetcher in fetchers:
         try:
             result = fetcher(url)
             results.append(result)
@@ -1076,33 +1141,44 @@ def write_text_report(
 def capture_error_screenshot(url: str, name: str, directory: Path) -> Path:
     try:
         from playwright.sync_api import sync_playwright
+        from playwright_stealth import stealth_sync
     except Exception as exc:  # pragma: no cover - depends on optional browser install
         raise RuntimeError(
-            "Playwright no esta instalado o Chromium no esta disponible. "
-            "Ejecuta: python -m playwright install chromium"
+            "Playwright o playwright-stealth no estan instalados o Chromium no esta disponible. "
+            "Ejecuta: pip install playwright playwright-stealth && python -m playwright install chromium"
         ) from exc
 
     path = directory / f"screenshot-{slugify(name)}.png"
+    PLAYWRIGHT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
+        context = p.chromium.launch_persistent_context(
+            str(PLAYWRIGHT_PROFILE_DIR),
+            headless=HEADLESS,
+            slow_mo=SLOW_MO_MS,
             user_agent=USER_AGENT,
             locale="es-ES",
+            timezone_id="Europe/Madrid",
             viewport={"width": 1366, "height": 900},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
+        page = context.new_page()
+        stealth_sync(page)
         try:
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                page.wait_for_timeout(3_000)
+                page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+                page.wait_for_timeout(5_000)
             except Exception:
                 page.wait_for_timeout(1_000)
             page.screenshot(path=str(path), full_page=True)
         finally:
-            browser.close()
+            context.close()
 
     return path
-
 
 def handle_manual_summary(
     config: dict[str, object],
