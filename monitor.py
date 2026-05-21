@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
@@ -20,7 +21,9 @@ STATE_DIR = Path(os.getenv("STATE_DIR", ".monitor_state"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes", "si"}
+ACTION_TO_RUN = os.getenv("ACTION_TO_RUN", "normal").strip().lower()
 MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
+MADRID_TIMEZONE = ZoneInfo("Europe/Madrid")
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -48,6 +51,8 @@ BLOCKED_MARKERS = [
 class FetchResult:
     text: str
     method: str
+    status_code: int | None = None
+    status_message: str = ""
 
 
 def load_url_configs() -> list[dict[str, object]]:
@@ -79,6 +84,24 @@ def load_url_configs() -> list[dict[str, object]]:
             )
 
     return configs
+
+
+def validate_action_to_run() -> str:
+    if ACTION_TO_RUN not in {"normal", "debug"}:
+        raise RuntimeError("ACTION_TO_RUN debe ser normal o debug.")
+    return ACTION_TO_RUN
+
+
+def is_debug_mode(action_to_run: str) -> bool:
+    return action_to_run == "debug"
+
+
+def is_monitoring_window(now_madrid: datetime) -> bool:
+    return 8 <= now_madrid.hour < 22
+
+
+def is_error_reminder_window(now_madrid: datetime) -> bool:
+    return now_madrid.hour == 12 and now_madrid.minute < 15
 
 
 def slugify(value: str) -> str:
@@ -145,7 +168,12 @@ def fetch_with_http(url: str) -> FetchResult:
     with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
         response = client.get(url)
         response.raise_for_status()
-        return FetchResult(text=clean_text(response.content), method="http")
+        return FetchResult(
+            text=clean_text(response.content),
+            method="http",
+            status_code=response.status_code,
+            status_message=response.reason_phrase,
+        )
 
 
 def fetch_with_browser(url: str) -> FetchResult:
@@ -165,13 +193,18 @@ def fetch_with_browser(url: str) -> FetchResult:
             viewport={"width": 1366, "height": 900},
         )
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(4_000)
             html = page.content()
         finally:
             browser.close()
 
-    return FetchResult(text=clean_text(html), method="browser")
+    return FetchResult(
+        text=clean_text(html),
+        method="browser",
+        status_code=response.status if response else None,
+        status_message="",
+    )
 
 
 def fetch_page(config: dict[str, object]) -> FetchResult:
@@ -229,34 +262,37 @@ def save_current(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def make_diff_summary(old: str, new: str, max_lines: int = 24) -> str:
-    old_lines = old.splitlines()
-    new_lines = new.splitlines()
+def make_before_after_summary(old: str, new: str, max_lines: int = 18) -> tuple[str, str]:
+    before_lines = []
+    after_lines = []
+
     diff = difflib.unified_diff(
-        old_lines,
-        new_lines,
+        old.splitlines(),
+        new.splitlines(),
         fromfile="antes",
         tofile="ahora",
         lineterm="",
-        n=2,
+        n=0,
     )
-
-    interesting = []
     for line in diff:
         if line.startswith(("+++", "---", "@@")):
             continue
-        if line.startswith(("+", "-")):
-            interesting.append(line)
-        if len(interesting) >= max_lines:
+        if line.startswith("-"):
+            before_lines.append(line[1:])
+        elif line.startswith("+"):
+            after_lines.append(line[1:])
+        if len(before_lines) >= max_lines and len(after_lines) >= max_lines:
             break
 
-    if not interesting:
-        return "El texto ha cambiado, pero no se pudo crear un resumen corto."
+    before = "\n".join(before_lines[:max_lines]) or "Sin lineas eliminadas claras."
+    after = "\n".join(after_lines[:max_lines]) or "Sin lineas nuevas claras."
 
-    summary = "\n".join(interesting)
-    if len(interesting) >= max_lines:
-        summary += "\n... resumen recortado por longitud"
-    return summary
+    if len(before_lines) > max_lines:
+        before += "\n... antes recortado"
+    if len(after_lines) > max_lines:
+        after += "\n... despues recortado"
+
+    return before, after
 
 
 def split_message(message: str, limit: int = 3900) -> list[str]:
@@ -352,6 +388,36 @@ def try_send_telegram_document(path: Path, caption: str) -> None:
         )
 
 
+def send_debug_summary(
+    name: str,
+    url: str,
+    status: str,
+    method: str,
+    checked_at: datetime,
+    status_code: int | None = None,
+    status_message: str = "",
+    detail: str = "",
+) -> None:
+    response = "sin codigo"
+    if status_code is not None:
+        response = str(status_code)
+        if status_message:
+            response += f" {status_message}"
+
+    message = (
+        f"Resumen debug: {name}\n\n"
+        f"URL: {url}\n"
+        f"Fecha Madrid: {checked_at.isoformat()}\n"
+        f"Estado monitor: {status}\n"
+        f"Metodo: {method}\n"
+        f"Respuesta: {response}"
+    )
+    if detail:
+        message += f"\nDetalle: {detail}"
+
+    try_send_telegram(message)
+
+
 def clean_error_detail(error: Exception) -> str:
     detail = str(error).splitlines()[0]
     detail = detail.split(" | browser:", 1)[0]
@@ -371,7 +437,7 @@ def make_text_file_content(
         f"URL: {url}\n"
         f"Metodo usado: {method}\n"
         f"Estado: {status}\n"
-        f"Fecha UTC: {checked_at.isoformat()}\n\n"
+        f"Fecha Madrid: {checked_at.isoformat()}\n\n"
         f"Texto extraido:\n{text}\n"
     )
     encoded = content.encode("utf-8")
@@ -403,7 +469,10 @@ def write_text_report(
     return path
 
 
-def handle_manual_summary(config: dict[str, object]) -> dict[str, object]:
+def handle_manual_summary(
+    config: dict[str, object],
+    notify_telegram: bool,
+) -> dict[str, object]:
     name = str(config["name"])
     url = str(config["url"])
     summary = str(config.get("summary", "")).strip()
@@ -419,7 +488,8 @@ def handle_manual_summary(config: dict[str, object]) -> dict[str, object]:
 
     print(f"Revision manual necesaria: {name}")
     print("URL: oculta en logs publicos")
-    try_send_telegram(message)
+    if notify_telegram:
+        try_send_telegram(message)
 
     return {
         "name": name,
@@ -428,7 +498,7 @@ def handle_manual_summary(config: dict[str, object]) -> dict[str, object]:
     }
 
 
-def process_url(config: dict[str, object]) -> dict[str, object]:
+def process_url(config: dict[str, object], checked_at: datetime) -> dict[str, object]:
     name = str(config["name"])
     url = str(config["url"])
     state_path = STATE_DIR / f"{slugify(name)}.txt"
@@ -446,6 +516,8 @@ def process_url(config: dict[str, object]) -> dict[str, object]:
             "status": "baseline",
             "method": result.method,
             "hash": current_hash,
+            "status_code": result.status_code,
+            "status_message": result.status_message,
             "_url": url,
             "_text": result.text,
         }
@@ -457,16 +529,20 @@ def process_url(config: dict[str, object]) -> dict[str, object]:
             "status": "unchanged",
             "method": result.method,
             "hash": current_hash,
+            "status_code": result.status_code,
+            "status_message": result.status_message,
             "_url": url,
             "_text": result.text,
         }
 
-    summary = make_diff_summary(previous, current_text)
+    before, after = make_before_after_summary(previous, current_text)
     message = (
         f"Cambio detectado en {name}\n\n"
+        f"Fecha Madrid: {checked_at.isoformat()}\n"
         f"URL: {url}\n"
         f"Metodo usado: {result.method}\n\n"
-        f"Resumen:\n{summary}"
+        f"Antes:\n{before}\n\n"
+        f"Despues:\n{after}"
     )
     try_send_telegram(message)
 
@@ -475,6 +551,8 @@ def process_url(config: dict[str, object]) -> dict[str, object]:
         "status": "changed",
         "method": result.method,
         "hash": current_hash,
+        "status_code": result.status_code,
+        "status_message": result.status_message,
         "_url": url,
         "_text": result.text,
     }
@@ -482,7 +560,17 @@ def process_url(config: dict[str, object]) -> dict[str, object]:
 
 def main() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc)
+    action_to_run = validate_action_to_run()
+    debug_mode = is_debug_mode(action_to_run)
+    now_utc = datetime.now(timezone.utc)
+    now_madrid = now_utc.astimezone(MADRID_TIMEZONE)
+
+    if not debug_mode and not is_monitoring_window(now_madrid):
+        print(
+            "Fuera de ventana de monitorizacion "
+            f"({now_madrid.isoformat()}). Ejecucion normal finalizada sin monitorizar."
+        )
+        return 0
 
     url_configs = load_url_configs()
 
@@ -496,31 +584,52 @@ def main() -> int:
             try:
                 print(f"Revisando: {name}")
                 if config.get("mode") == "manual_summary":
-                    result = handle_manual_summary(config)
+                    result = handle_manual_summary(config, notify_telegram=debug_mode)
                     print(json.dumps(result, ensure_ascii=False))
                     results.append(result)
+                    if debug_mode:
+                        send_debug_summary(
+                            name=name,
+                            url=str(config["url"]),
+                            status="manual_summary",
+                            method="manual",
+                            checked_at=now_madrid,
+                            detail="URL configurada para revision manual.",
+                        )
                     continue
 
-                result = process_url(config)
+                result = process_url(config, now_madrid)
 
                 url = str(result.pop("_url"))
                 text = str(result.pop("_text"))
                 print(json.dumps(result, ensure_ascii=False))
                 results.append(result)
 
-                report_path = write_text_report(
-                    report_dir,
-                    name,
-                    url,
-                    str(result["method"]),
-                    str(result["status"]),
-                    now,
-                    text,
-                )
-                try_send_telegram_document(
-                    report_path,
-                    f"Texto extraido de {name} ({result['status']})",
-                )
+                if debug_mode:
+                    send_debug_summary(
+                        name=name,
+                        url=url,
+                        status=str(result["status"]),
+                        method=str(result["method"]),
+                        checked_at=now_madrid,
+                        status_code=result.get("status_code"),
+                        status_message=str(result.get("status_message") or ""),
+                    )
+
+                if debug_mode or result["status"] == "changed":
+                    report_path = write_text_report(
+                        report_dir,
+                        name,
+                        url,
+                        str(result["method"]),
+                        str(result["status"]),
+                        now_madrid,
+                        text,
+                    )
+                    try_send_telegram_document(
+                        report_path,
+                        f"Texto extraido de {name} ({result['status']})",
+                    )
             except Exception as exc:
                 telegram_error_message = (
                     f"Error monitorizando {name}\n\n"
@@ -535,7 +644,21 @@ def main() -> int:
                     "El bot continua con el resto de paginas."
                 )
                 print(log_error_message, file=sys.stderr)
-                try_send_telegram(telegram_error_message)
+                if debug_mode:
+                    try_send_telegram(telegram_error_message)
+                    send_debug_summary(
+                        name=name,
+                        url=str(config["url"]),
+                        status="error",
+                        method="error",
+                        checked_at=now_madrid,
+                        detail=clean_error_detail(exc),
+                    )
+                elif is_error_reminder_window(now_madrid):
+                    try_send_telegram(
+                        "Recordatorio de error de monitorizacion\n\n"
+                        + telegram_error_message
+                    )
                 results.append({"name": name, "status": "error", "error": str(exc)})
 
     print("\nResumen final:")

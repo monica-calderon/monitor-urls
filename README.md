@@ -6,13 +6,14 @@ Las URLs no estan escritas en el codigo ni en el README. Se guardan en GitHub Se
 
 ## Como funciona
 
-1. cron-job.org lanza el workflow de GitHub Actions cada 15 minutos.
+1. cron-job.org lanza el workflow de GitHub Actions cada 15 minutos en modo `normal`.
 2. GitHub Actions ejecuta `monitor.py`.
 3. El script lee las URLs desde el secret `MONITOR_URLS_JSON`.
 4. Cada pagina se descarga primero por HTTP normal y, si hace falta, con Chromium mediante Playwright.
 5. Si una pagina cambia, el bot envia un resumen por Telegram.
-6. Si una pagina se lee correctamente, el bot envia un `.txt` individual con el texto extraido.
-7. Si una pagina falla, el bot envia un error por Telegram y continua con las demas.
+6. En modo `debug`, si una pagina se lee correctamente, el bot envia un `.txt` individual con el texto extraido.
+7. En modo `normal`, el bot solo envia `.txt` si esa pagina ha cambiado.
+8. Si una pagina falla, el bot registra el error y continua con las demas.
 
 ## Archivos importantes
 
@@ -74,7 +75,7 @@ Campos:
 - `expected_terms`: palabras que deberian aparecer en el texto.
 - `strict_expected_terms`: opcional. Si es `true`, la pagina se considera error si no aparecen esas palabras.
 - `mode`: opcional. Usa `manual_summary` para webs que no deben abrirse automaticamente.
-- `summary`: opcional. Texto fijo que se enviara en Telegram cuando `mode` sea `manual_summary`.
+- `summary`: opcional. Texto fijo que se enviara en Telegram en modo `debug` cuando `mode` sea `manual_summary`.
 
 ## Webs con revision manual
 
@@ -105,10 +106,32 @@ La alternativa fiable para automatizar Idealista es solicitar acceso a su Search
 1. Entra en la pestana `Actions`.
 2. Abre el workflow `Monitor URLs`.
 3. Pulsa `Run workflow`.
-4. Espera a que termine.
-5. Comprueba Telegram.
+4. Elige la rama `main`.
+5. En `Action to run`, elige:
+   - `normal`: comportamiento de produccion.
+   - `debug`: fuerza la ejecucion aunque sea fuera de horario y envia resumen de cada URL.
+6. Espera a que termine.
+7. Comprueba Telegram.
 
-La primera ejecucion crea una base inicial. Puede no enviar resumen de cambios, pero si enviara los `.txt` de las paginas que se hayan leido correctamente.
+La primera ejecucion crea una base inicial. En `normal` puede no enviar resumen ni `.txt` si todavia no hay cambios. En `debug` si enviara resumenes y `.txt` de las paginas leidas correctamente.
+
+## Modos de ejecucion
+
+`normal`:
+
+- Es el modo usado por cron-job.org.
+- Solo monitoriza entre las 08:00 y las 22:00, hora de Madrid.
+- Si una web no cambia, no envia `.txt`.
+- Si una web cambia, envia alerta con `Antes` y `Despues`, y adjunta el `.txt`.
+- Si hay errores, solo envia recordatorio si la ejecucion ocurre entre las 12:00 y las 12:15.
+
+`debug`:
+
+- Se elige manualmente desde GitHub Actions.
+- Ejecuta siempre, tambien fuera del horario 08:00-22:00.
+- Envia un resumen de monitorizacion por cada URL con URL, metodo, estado y codigo de respuesta si existe.
+- Envia `.txt` de todas las webs leidas correctamente.
+- Informa tambien de URLs en `manual_summary`.
 
 ## Configurar cron-job.org cada 15 minutos
 
@@ -139,9 +162,14 @@ Body:
 
 ```json
 {
-  "event_type": "monitor-urls"
+  "event_type": "monitor-urls",
+  "client_payload": {
+    "action_to_run": "normal"
+  }
 }
 ```
+
+`client_payload` es opcional porque el workflow usa `normal` por defecto. Aun asi, se recomienda incluirlo para que la configuracion sea explicita.
 
 Respuesta esperada:
 
@@ -179,10 +207,12 @@ No guardes este token en el repositorio.
 
 Por cada ejecucion real:
 
-- Si una web cambia: mensaje con resumen de cambios.
-- Si una web falla: mensaje de error con la URL para revisar manualmente.
-- Si una web se lee correctamente: archivo `.txt` con nombre identificativo.
-- Si una web esta en `manual_summary`: mensaje con enlace manual y resumen fijo opcional.
+- Si una web cambia: mensaje de alerta con `Antes` y `Despues`.
+- Si una web falla en `debug`: mensaje de error con la URL para revisar manualmente.
+- Si una web falla en `normal`: recordatorio solo entre las 12:00 y las 12:15.
+- Si una web se lee correctamente en `debug`: archivo `.txt` con nombre identificativo.
+- Si una web cambia en `normal`: archivo `.txt` con nombre identificativo.
+- Si una web esta en `manual_summary`: en `debug`, mensaje con enlace manual y resumen fijo opcional; en `normal`, solo queda registrado en logs.
 
 Cada `.txt` incluye:
 
@@ -190,7 +220,7 @@ Cada `.txt` incluye:
 - URL.
 - Metodo usado (`http` o `browser`).
 - Estado (`baseline`, `unchanged` o `changed`).
-- Fecha UTC.
+- Fecha Madrid.
 - Texto extraido.
 
 Las webs con error no generan `.txt`.
@@ -213,6 +243,7 @@ Prueba sin enviar nada real a Telegram:
 ```powershell
 $env:MONITOR_URLS_JSON = '[{"name":"Nombre pagina","url":"https://ejemplo.com","expected_terms":["ejemplo"]}]'
 $env:DRY_RUN = "1"
+$env:ACTION_TO_RUN = "debug"
 python monitor.py
 ```
 

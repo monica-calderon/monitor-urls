@@ -2,6 +2,15 @@ name: Monitor URLs
 
 on:
   workflow_dispatch:
+    inputs:
+      action_to_run:
+        description: Action to run
+        required: true
+        default: normal
+        type: choice
+        options:
+          - normal
+          - debug
   repository_dispatch:
     types:
       - monitor-urls
@@ -47,6 +56,8 @@ jobs:
 
       - name: Ejecutar monitor
         env:
+          ACTION_TO_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.action_to_run || github.event.client_payload.action_to_run || 'normal' }}
+          TZ: Europe/Madrid
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MONITOR_URLS_JSON: ${{ secrets.MONITOR_URLS_JSON }}
