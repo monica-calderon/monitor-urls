@@ -72,6 +72,11 @@ def load_url_configs() -> list[dict[str, object]]:
             raise RuntimeError(f"La URL #{index} no tiene un campo name valido.")
         if not isinstance(config.get("url"), str) or not config["url"].strip():
             raise RuntimeError(f"La URL #{index} no tiene un campo url valido.")
+        mode = config.get("mode", "auto")
+        if mode not in {"auto", "manual_summary"}:
+            raise RuntimeError(
+                f"La URL #{index} tiene un mode no valido. Usa auto o manual_summary."
+            )
 
     return configs
 
@@ -398,6 +403,31 @@ def write_text_report(
     return path
 
 
+def handle_manual_summary(config: dict[str, object]) -> dict[str, object]:
+    name = str(config["name"])
+    url = str(config["url"])
+    summary = str(config.get("summary", "")).strip()
+
+    message = (
+        f"Revision manual necesaria: {name}\n\n"
+        f"URL: {url}\n\n"
+        "Esta web no se monitoriza automaticamente para evitar saltar restricciones "
+        "anti-bot. Revisa el enlace manualmente."
+    )
+    if summary:
+        message += f"\n\nResumen conocido:\n{summary}"
+
+    print(f"Revision manual necesaria: {name}")
+    print("URL: oculta en logs publicos")
+    try_send_telegram(message)
+
+    return {
+        "name": name,
+        "status": "manual_summary",
+        "method": "manual",
+    }
+
+
 def process_url(config: dict[str, object]) -> dict[str, object]:
     name = str(config["name"])
     url = str(config["url"])
@@ -465,6 +495,12 @@ def main() -> int:
             name = str(config["name"])
             try:
                 print(f"Revisando: {name}")
+                if config.get("mode") == "manual_summary":
+                    result = handle_manual_summary(config)
+                    print(json.dumps(result, ensure_ascii=False))
+                    results.append(result)
+                    continue
+
                 result = process_url(config)
 
                 url = str(result.pop("_url"))

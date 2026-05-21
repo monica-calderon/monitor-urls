@@ -56,6 +56,12 @@ MONITOR_URLS_JSON
     "url": "https://ejemplo.com/pagina-2",
     "expected_terms": ["palabra", "importante"],
     "strict_expected_terms": true
+  },
+  {
+    "name": "Idealista ejemplo",
+    "url": "https://ejemplo.com/pagina-manual",
+    "mode": "manual_summary",
+    "summary": "Nota fija opcional con los datos principales conocidos."
   }
 ]
 ```
@@ -66,6 +72,32 @@ Campos:
 - `url`: URL privada que se monitoriza.
 - `expected_terms`: palabras que deberian aparecer en el texto.
 - `strict_expected_terms`: opcional. Si es `true`, la pagina se considera error si no aparecen esas palabras.
+- `mode`: opcional. Usa `manual_summary` para webs que no deben abrirse automaticamente.
+- `summary`: opcional. Texto fijo que se enviara en Telegram cuando `mode` sea `manual_summary`.
+
+## Webs con revision manual
+
+Algunas webs, como Idealista, pueden bloquear la automatizacion con 403, captcha o verificacion de dispositivo.
+
+Para esas webs puedes usar:
+
+```json
+{
+  "name": "Idealista Essence Homes II",
+  "url": "https://ejemplo.com/url-privada",
+  "mode": "manual_summary",
+  "summary": "Resumen fijo opcional para recordar los datos importantes."
+}
+```
+
+En ese modo:
+
+- El bot no intenta abrir la URL automaticamente.
+- No se genera `.txt`.
+- Se envia un mensaje de Telegram con el enlace para revisar manualmente.
+- Si existe `summary`, tambien se incluye en el mensaje.
+
+La alternativa fiable para automatizar Idealista es solicitar acceso a su Search API oficial.
 
 ## Probar manualmente en GitHub
 
@@ -139,6 +171,7 @@ Por cada ejecucion real:
 - Si una web cambia: mensaje con resumen de cambios.
 - Si una web falla: mensaje de error con la URL para revisar manualmente.
 - Si una web se lee correctamente: archivo `.txt` con nombre identificativo.
+- Si una web esta en `manual_summary`: mensaje con enlace manual y resumen fijo opcional.
 
 Cada `.txt` incluye:
 
@@ -209,6 +242,6 @@ Si algun dia cambias el repositorio a `Private`, revisa el consumo de minutos de
 
 ## Notas
 
-- Idealista puede bloquear el acceso automatico con verificacion de dispositivo. En ese caso el bot avisara por Telegram y seguira con las demas paginas.
+- Idealista puede bloquear el acceso automatico con verificacion de dispositivo. Usa `mode: "manual_summary"` o solicita acceso a la Search API oficial.
 - El estado se guarda con cache de GitHub Actions. Si GitHub borra la cache, la siguiente ejecucion creara una nueva base inicial.
 - Si cron-job.org deja de ejecutar, revisa que el token de GitHub no haya caducado.
