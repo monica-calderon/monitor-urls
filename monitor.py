@@ -16,6 +16,10 @@ from zoneinfo import ZoneInfo
 import httpx
 from bs4 import BeautifulSoup
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 STATE_DIR = Path(os.getenv("STATE_DIR", ".monitor_state"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -388,33 +392,86 @@ def try_send_telegram_document(path: Path, caption: str) -> None:
         )
 
 
-def send_debug_summary(
-    name: str,
-    url: str,
-    status: str,
-    method: str,
-    checked_at: datetime,
-    status_code: int | None = None,
+def format_response_status(
+    status_code: int | None,
     status_message: str = "",
-    detail: str = "",
-) -> None:
+) -> str:
     response = "sin codigo"
     if status_code is not None:
         response = str(status_code)
         if status_message:
             response += f" {status_message}"
+    return response
 
+
+def status_icon(status: str) -> str:
+    return {
+        "baseline": "🆕",
+        "unchanged": "✅",
+        "changed": "🔔",
+        "manual_summary": "👀",
+        "error": "⚠️",
+    }.get(status, "ℹ️")
+
+
+def build_debug_summary(
+    checked_at: datetime,
+    items: list[dict[str, object]],
+) -> str:
+    total = len(items)
+    changed = sum(1 for item in items if item.get("status") == "changed")
+    errors = sum(1 for item in items if item.get("status") == "error")
+    unchanged = sum(1 for item in items if item.get("status") == "unchanged")
+    baseline = sum(1 for item in items if item.get("status") == "baseline")
+    manual = sum(1 for item in items if item.get("status") == "manual_summary")
+
+    lines = [
+        "🧪 Resumen debug",
+        "",
+        f"🕒 Fecha Madrid: {checked_at.isoformat()}",
+        f"📌 URLs revisadas: {total}",
+        f"🔔 Cambios: {changed}",
+        f"✅ Sin cambios: {unchanged}",
+        f"🆕 Baseline: {baseline}",
+        f"👀 Manuales: {manual}",
+        f"⚠️ Errores: {errors}",
+        "",
+        "Detalle:",
+    ]
+
+    for item in items:
+        status = str(item.get("status", "unknown"))
+        method = str(item.get("method", "unknown"))
+        status_code = item.get("status_code")
+        code = status_code if isinstance(status_code, int) else None
+        response = format_response_status(code, str(item.get("status_message") or ""))
+
+        lines.extend(
+            [
+                "",
+                f"{status_icon(status)} {item.get('name')}",
+                f"URL: {item.get('url')}",
+                f"Estado: {status}",
+                f"Metodo: {method}",
+                f"Respuesta: {response}",
+            ]
+        )
+        detail = str(item.get("detail") or "").strip()
+        if detail:
+            lines.append(f"Detalle: {detail}")
+
+    return "\n".join(lines)
+
+
+def send_debug_summary(
+    checked_at: datetime,
+    items: list[dict[str, object]],
+) -> None:
     message = (
-        f"Resumen debug: {name}\n\n"
-        f"URL: {url}\n"
-        f"Fecha Madrid: {checked_at.isoformat()}\n"
-        f"Estado monitor: {status}\n"
-        f"Metodo: {method}\n"
-        f"Respuesta: {response}"
+        build_debug_summary(checked_at, items)
+        if items
+        else f"🧪 Resumen debug\n\n🕒 Fecha Madrid: {checked_at.isoformat()}\n📌 No se reviso ninguna URL."
     )
-    if detail:
-        message += f"\nDetalle: {detail}"
-
     try_send_telegram(message)
 
 
@@ -478,13 +535,14 @@ def handle_manual_summary(
     summary = str(config.get("summary", "")).strip()
 
     message = (
-        f"Revision manual necesaria: {name}\n\n"
-        f"URL: {url}\n\n"
+        f"👀 Revision manual necesaria\n\n"
+        f"🏷️ Web: {name}\n"
+        f"🔗 URL: {url}\n\n"
         "Esta web no se monitoriza automaticamente para evitar saltar restricciones "
         "anti-bot. Revisa el enlace manualmente."
     )
     if summary:
-        message += f"\n\nResumen conocido:\n{summary}"
+        message += f"\n\n📝 Resumen conocido:\n{summary}"
 
     print(f"Revision manual necesaria: {name}")
     print("URL: oculta en logs publicos")
@@ -537,12 +595,13 @@ def process_url(config: dict[str, object], checked_at: datetime) -> dict[str, ob
 
     before, after = make_before_after_summary(previous, current_text)
     message = (
-        f"Cambio detectado en {name}\n\n"
-        f"Fecha Madrid: {checked_at.isoformat()}\n"
-        f"URL: {url}\n"
-        f"Metodo usado: {result.method}\n\n"
-        f"Antes:\n{before}\n\n"
-        f"Despues:\n{after}"
+        f"🔔 Cambio detectado\n\n"
+        f"🏷️ Web: {name}\n"
+        f"🕒 Fecha Madrid: {checked_at.isoformat()}\n"
+        f"🔗 URL: {url}\n"
+        f"🛠️ Metodo usado: {result.method}\n\n"
+        f"⬅️ Antes:\n{before}\n\n"
+        f"➡️ Despues:\n{after}"
     )
     try_send_telegram(message)
 
@@ -575,6 +634,7 @@ def main() -> int:
     url_configs = load_url_configs()
 
     results = []
+    debug_items: list[dict[str, object]] = []
 
     with TemporaryDirectory() as temp_dir:
         report_dir = Path(temp_dir)
@@ -584,17 +644,18 @@ def main() -> int:
             try:
                 print(f"Revisando: {name}")
                 if config.get("mode") == "manual_summary":
-                    result = handle_manual_summary(config, notify_telegram=debug_mode)
+                    result = handle_manual_summary(config, notify_telegram=False)
                     print(json.dumps(result, ensure_ascii=False))
                     results.append(result)
                     if debug_mode:
-                        send_debug_summary(
-                            name=name,
-                            url=str(config["url"]),
-                            status="manual_summary",
-                            method="manual",
-                            checked_at=now_madrid,
-                            detail="URL configurada para revision manual.",
+                        debug_items.append(
+                            {
+                                "name": name,
+                                "url": str(config["url"]),
+                                "status": "manual_summary",
+                                "method": "manual",
+                                "detail": "URL configurada para revision manual.",
+                            }
                         )
                     continue
 
@@ -606,14 +667,15 @@ def main() -> int:
                 results.append(result)
 
                 if debug_mode:
-                    send_debug_summary(
-                        name=name,
-                        url=url,
-                        status=str(result["status"]),
-                        method=str(result["method"]),
-                        checked_at=now_madrid,
-                        status_code=result.get("status_code"),
-                        status_message=str(result.get("status_message") or ""),
+                    debug_items.append(
+                        {
+                            "name": name,
+                            "url": url,
+                            "status": str(result["status"]),
+                            "method": str(result["method"]),
+                            "status_code": result.get("status_code"),
+                            "status_message": str(result.get("status_message") or ""),
+                        }
                     )
 
                 if debug_mode or result["status"] == "changed":
@@ -628,14 +690,14 @@ def main() -> int:
                     )
                     try_send_telegram_document(
                         report_path,
-                        f"Texto extraido de {name} ({result['status']})",
+                        f"📄 Texto extraido de {name} ({result['status']})",
                     )
             except Exception as exc:
                 telegram_error_message = (
-                    f"Error monitorizando {name}\n\n"
-                    f"URL: {config['url']}\n\n"
-                    f"Detalle: {clean_error_detail(exc)}\n\n"
-                    "El bot continua con el resto de paginas."
+                    f"⚠️ Error monitorizando {name}\n\n"
+                    f"🔗 URL: {config['url']}\n\n"
+                    f"🧾 Detalle: {clean_error_detail(exc)}\n\n"
+                    "✅ El bot continua con el resto de paginas."
                 )
                 log_error_message = (
                     f"Error monitorizando {name}\n\n"
@@ -645,21 +707,24 @@ def main() -> int:
                 )
                 print(log_error_message, file=sys.stderr)
                 if debug_mode:
-                    try_send_telegram(telegram_error_message)
-                    send_debug_summary(
-                        name=name,
-                        url=str(config["url"]),
-                        status="error",
-                        method="error",
-                        checked_at=now_madrid,
-                        detail=clean_error_detail(exc),
+                    debug_items.append(
+                        {
+                            "name": name,
+                            "url": str(config["url"]),
+                            "status": "error",
+                            "method": "error",
+                            "detail": clean_error_detail(exc),
+                        }
                     )
                 elif is_error_reminder_window(now_madrid):
                     try_send_telegram(
-                        "Recordatorio de error de monitorizacion\n\n"
+                        "⏰ Recordatorio de error de monitorizacion\n\n"
                         + telegram_error_message
                     )
                 results.append({"name": name, "status": "error", "error": str(exc)})
+
+    if debug_mode:
+        send_debug_summary(now_madrid, debug_items)
 
     print("\nResumen final:")
     print(json.dumps(results, ensure_ascii=False, indent=2))

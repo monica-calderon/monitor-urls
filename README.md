@@ -75,7 +75,7 @@ Campos:
 - `expected_terms`: palabras que deberian aparecer en el texto.
 - `strict_expected_terms`: opcional. Si es `true`, la pagina se considera error si no aparecen esas palabras.
 - `mode`: opcional. Usa `manual_summary` para webs que no deben abrirse automaticamente.
-- `summary`: opcional. Texto fijo que se enviara en Telegram en modo `debug` cuando `mode` sea `manual_summary`.
+- `summary`: opcional. Texto fijo de referencia para webs en modo `manual_summary`.
 
 ## Webs con revision manual
 
@@ -96,8 +96,8 @@ En ese modo:
 
 - El bot no intenta abrir la URL automaticamente.
 - No se genera `.txt`.
-- Se envia un mensaje de Telegram con el enlace para revisar manualmente.
-- Si existe `summary`, tambien se incluye en el mensaje.
+- En `debug`, aparece dentro del resumen final de monitorizacion.
+- En `normal`, queda registrado en logs y no genera mensaje propio.
 
 La alternativa fiable para automatizar Idealista es solicitar acceso a su Search API oficial.
 
@@ -109,11 +109,11 @@ La alternativa fiable para automatizar Idealista es solicitar acceso a su Search
 4. Elige la rama `main`.
 5. En `Action to run`, elige:
    - `normal`: comportamiento de produccion.
-   - `debug`: fuerza la ejecucion aunque sea fuera de horario y envia resumen de cada URL.
+   - `debug`: fuerza la ejecucion aunque sea fuera de horario y envia un resumen final con todas las URLs.
 6. Espera a que termine.
 7. Comprueba Telegram.
 
-La primera ejecucion crea una base inicial. En `normal` puede no enviar resumen ni `.txt` si todavia no hay cambios. En `debug` si enviara resumenes y `.txt` de las paginas leidas correctamente.
+La primera ejecucion crea una base inicial. En `normal` puede no enviar resumen ni `.txt` si todavia no hay cambios. En `debug` enviara un resumen final y los `.txt` de las paginas leidas correctamente.
 
 ## Modos de ejecucion
 
@@ -129,7 +129,7 @@ La primera ejecucion crea una base inicial. En `normal` puede no enviar resumen 
 
 - Se elige manualmente desde GitHub Actions.
 - Ejecuta siempre, tambien fuera del horario 08:00-22:00.
-- Envia un resumen de monitorizacion por cada URL con URL, metodo, estado y codigo de respuesta si existe.
+- Al final de la ejecucion, envia un unico `Resumen debug` con todas las URLs, metodo, estado y codigo de respuesta si existe.
 - Envia `.txt` de todas las webs leidas correctamente.
 - Informa tambien de URLs en `manual_summary`.
 
@@ -207,12 +207,13 @@ No guardes este token en el repositorio.
 
 Por cada ejecucion real:
 
+- Los mensajes usan emojis y secciones visuales para distinguir cambios, errores, URLs manuales y archivos.
 - Si una web cambia: mensaje de alerta con `Antes` y `Despues`.
-- Si una web falla en `debug`: mensaje de error con la URL para revisar manualmente.
+- Si una web falla en `debug`: aparece en el `Resumen debug` final con la URL y el detalle seguro.
 - Si una web falla en `normal`: recordatorio solo entre las 12:00 y las 12:15.
 - Si una web se lee correctamente en `debug`: archivo `.txt` con nombre identificativo.
 - Si una web cambia en `normal`: archivo `.txt` con nombre identificativo.
-- Si una web esta en `manual_summary`: en `debug`, mensaje con enlace manual y resumen fijo opcional; en `normal`, solo queda registrado en logs.
+- Si una web esta en `manual_summary`: en `debug`, aparece en el resumen final; en `normal`, solo queda registrado en logs.
 
 Cada `.txt` incluye:
 
