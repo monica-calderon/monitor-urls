@@ -123,7 +123,9 @@ El ultimo mensaje procesado se guarda en `.monitor_state/telegram_update_offset.
 
 Algunas webs, como Idealista, pueden bloquear la automatizacion con 403, captcha o verificacion de dispositivo.
 
-Para esas webs puedes usar:
+El bot intenta aprovechar HTML util aunque la respuesta sea `403`. Si Idealista devuelve datos reales del anuncio, el metodo aparecera como `http_partial_403`, `browser_partial_403` o `browser_no_js_partial_403` en el resumen debug.
+
+Si una web solo devuelve bloqueo, puedes usar:
 
 ```json
 {

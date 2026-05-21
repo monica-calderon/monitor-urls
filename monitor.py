@@ -133,6 +133,7 @@ class FetchResult:
     method: str
     status_code: int | None = None
     status_message: str = ""
+    detail: str = ""
 
 
 def load_url_configs() -> list[dict[str, object]]:
@@ -344,6 +345,102 @@ def has_expected_terms(text: str, expected_terms: Iterable[str]) -> bool:
     return all(term.lower() in lowered for term in expected_terms)
 
 
+def is_idealista_url(url: str) -> bool:
+    return "idealista.com" in urlparse(url).netloc.lower()
+
+
+def unique_lines(lines: Iterable[str]) -> list[str]:
+    result = []
+    seen = set()
+    for line in lines:
+        cleaned = re.sub(r"\s+", " ", line).strip()
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def meta_content(soup: BeautifulSoup, selector: str) -> str:
+    tag = soup.select_one(selector)
+    if tag is None:
+        return ""
+    value = tag.get("content")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def extract_idealista_text(html: str | bytes) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    remove_basic_noise(soup)
+
+    lines = []
+    for selector in (
+        "title",
+        'meta[name="description"]',
+        'meta[property="og:title"]',
+        'meta[property="og:description"]',
+    ):
+        if selector.startswith("meta"):
+            lines.append(meta_content(soup, selector))
+        else:
+            tag = soup.select_one(selector)
+            if tag is not None:
+                lines.append(tag.get_text(" ", strip=True))
+
+    useful_selectors = [
+        ".main-info__title-main",
+        ".main-info__title-minor",
+        ".info-data",
+        ".info-features",
+        ".commentsContainer .comment",
+        "#details",
+        ".table__new-dev-typologies",
+        "#headerMap",
+        "#stats",
+        ".ad-reference-container",
+        ".professional-name",
+    ]
+    for selector in useful_selectors:
+        for tag in soup.select(selector):
+            lines.append(tag.get_text("\n", strip=True))
+
+    if not any(lines):
+        return clean_text(html)
+
+    return "\n".join(unique_lines(lines))
+
+
+def has_useful_listing_content(text: str, url: str) -> bool:
+    lowered = text.lower()
+    if len(text) < 200 or looks_blocked(text):
+        return False
+
+    if is_idealista_url(url):
+        strong_markers = [
+            "obra nueva",
+            "pisos disponibles",
+            "referencia del anuncio",
+            "comentario del anunciante",
+            "características básicas",
+            "precio",
+            "desde",
+        ]
+        return sum(1 for marker in strong_markers if marker in lowered) >= 2
+
+    return True
+
+
+def extract_text_for_url(html: str | bytes, url: str) -> str:
+    if is_idealista_url(url):
+        idealista_text = extract_idealista_text(html)
+        if has_useful_listing_content(idealista_text, url):
+            return idealista_text
+    return clean_text(html)
+
+
 def fetch_with_http(url: str) -> FetchResult:
     headers = {
         "User-Agent": USER_AGENT,
@@ -352,16 +449,29 @@ def fetch_with_http(url: str) -> FetchResult:
     }
     with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
         response = client.get(url)
-        response.raise_for_status()
+        text = extract_text_for_url(response.content, url)
+        if response.is_error and not has_useful_listing_content(text, url):
+            response.raise_for_status()
+
+        method = "http"
+        detail = ""
+        if response.is_error:
+            method = f"http_partial_{response.status_code}"
+            detail = (
+                "Se extrajo contenido util del HTML recibido aunque la respuesta "
+                f"fue {response.status_code}."
+            )
+
         return FetchResult(
-            text=clean_text(response.content),
-            method="http",
+            text=text,
+            method=method,
             status_code=response.status_code,
             status_message=response.reason_phrase,
+            detail=detail,
         )
 
 
-def fetch_with_browser(url: str) -> FetchResult:
+def fetch_with_browser_mode(url: str, java_script_enabled: bool) -> FetchResult:
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # pragma: no cover - depends on optional browser install
@@ -376,6 +486,7 @@ def fetch_with_browser(url: str) -> FetchResult:
             user_agent=USER_AGENT,
             locale="es-ES",
             viewport={"width": 1366, "height": 900},
+            java_script_enabled=java_script_enabled,
         )
         try:
             response = page.goto(url, wait_until="domcontentloaded", timeout=60_000)
@@ -384,12 +495,31 @@ def fetch_with_browser(url: str) -> FetchResult:
         finally:
             browser.close()
 
+    text = extract_text_for_url(html, url)
+    method = "browser" if java_script_enabled else "browser_no_js"
+    detail = ""
+    if response and response.status >= 400 and has_useful_listing_content(text, url):
+        method = f"{method}_partial_{response.status}"
+        detail = (
+            "Se extrajo contenido util del HTML recibido aunque la respuesta "
+            f"fue {response.status}."
+        )
+
     return FetchResult(
-        text=clean_text(html),
-        method="browser",
+        text=text,
+        method=method,
         status_code=response.status if response else None,
         status_message="",
+        detail=detail,
     )
+
+
+def fetch_with_browser(url: str) -> FetchResult:
+    return fetch_with_browser_mode(url, java_script_enabled=True)
+
+
+def fetch_with_browser_no_js(url: str) -> FetchResult:
+    return fetch_with_browser_mode(url, java_script_enabled=False)
 
 
 def fetch_page(config: dict[str, object]) -> FetchResult:
@@ -401,7 +531,7 @@ def fetch_page(config: dict[str, object]) -> FetchResult:
     errors = []
     results = []
 
-    for fetcher in (fetch_with_http, fetch_with_browser):
+    for fetcher in (fetch_with_http, fetch_with_browser, fetch_with_browser_no_js):
         try:
             result = fetcher(url)
             results.append(result)
@@ -427,7 +557,7 @@ def fetch_page(config: dict[str, object]) -> FetchResult:
         except Exception as exc:
             errors.append(f"{fetcher.__name__}: {exc}")
 
-    if results and not strict_expected_terms:
+    if results and not strict_expected_terms and not is_idealista_url(url):
         best = max(results, key=lambda item: len(item.text))
         if best.text:
             return best
@@ -994,6 +1124,7 @@ def process_url(
             "state_key": state_key,
             "status_code": result.status_code,
             "status_message": result.status_message,
+            "detail": result.detail,
             "_url": url,
             "_text": result.text,
         }
@@ -1010,6 +1141,7 @@ def process_url(
             "state_key": state_key,
             "status_code": result.status_code,
             "status_message": result.status_message,
+            "detail": result.detail,
             "_url": url,
             "_text": result.text,
         }
@@ -1034,6 +1166,7 @@ def process_url(
         "state_key": state_key,
         "status_code": result.status_code,
         "status_message": result.status_message,
+        "detail": result.detail,
         "_url": url,
         "_text": result.text,
     }
@@ -1118,6 +1251,7 @@ def main() -> int:
                             "method": str(result["method"]),
                             "status_code": result.get("status_code"),
                             "status_message": str(result.get("status_message") or ""),
+                            "detail": str(result.get("detail") or ""),
                         }
                     )
 
