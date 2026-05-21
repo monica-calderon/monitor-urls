@@ -19,6 +19,7 @@ Las URLs no estan escritas en el codigo ni en el README. Se guardan en GitHub Se
 - `monitor.py`: bot principal.
 - `dump_urls_text.py`: prueba local para ver el texto que se extrae de las paginas.
 - `requirements.txt`: dependencias de Python.
+- `.env.example`: ejemplo de variables locales sin secretos reales.
 - `.github/workflows/monitor.yml`: workflow de GitHub Actions lanzado manualmente o desde cron-job.org.
 - `.monitor_state/`: estado local de comparacion. No se sube a GitHub.
 
@@ -204,6 +205,8 @@ python -m venv .venv
 pip install -r requirements.txt
 python -m playwright install chromium
 ```
+
+Puedes usar `.env.example` como plantilla para crear tu `.env` local. El archivo `.env` real no se sube a GitHub porque puede contener secretos.
 
 Prueba sin enviar nada real a Telegram:
 
