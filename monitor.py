@@ -17,11 +17,9 @@ from bs4 import BeautifulSoup
 
 
 STATE_DIR = Path(os.getenv("STATE_DIR", ".monitor_state"))
-LAST_SCAN_PATH = STATE_DIR / "last_scan_at.txt"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes", "si"}
-SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "15"))
 MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
 
 USER_AGENT = (
@@ -224,36 +222,6 @@ def load_previous(path: Path) -> str | None:
 def save_current(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-
-
-def should_skip_scheduled_scan(now: datetime) -> bool:
-    if os.getenv("GITHUB_EVENT_NAME") != "schedule":
-        return False
-    if not LAST_SCAN_PATH.exists():
-        return False
-
-    try:
-        last_scan = datetime.fromisoformat(LAST_SCAN_PATH.read_text(encoding="utf-8").strip())
-    except ValueError:
-        return False
-
-    elapsed_seconds = (now - last_scan).total_seconds()
-    minimum_seconds = SCAN_INTERVAL_MINUTES * 60
-    if elapsed_seconds >= minimum_seconds:
-        return False
-
-    remaining_minutes = round((minimum_seconds - elapsed_seconds) / 60, 1)
-    print(
-        f"Saltando ejecucion programada: solo han pasado "
-        f"{round(elapsed_seconds / 60, 1)} minutos desde el ultimo escaneo. "
-        f"Faltan aproximadamente {remaining_minutes} minutos."
-    )
-    return True
-
-
-def record_scan_time(now: datetime) -> None:
-    LAST_SCAN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LAST_SCAN_PATH.write_text(now.isoformat(), encoding="utf-8")
 
 
 def make_diff_summary(old: str, new: str, max_lines: int = 24) -> str:
@@ -485,11 +453,8 @@ def process_url(config: dict[str, object]) -> dict[str, object]:
 def main() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
-    if should_skip_scheduled_scan(now):
-        return 0
 
     url_configs = load_url_configs()
-    record_scan_time(now)
 
     results = []
 

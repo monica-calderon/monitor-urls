@@ -1,72 +1,48 @@
 # Monitor de URLs con Telegram
 
-Este proyecto revisa varias paginas web cada 15 minutos, avisa por Telegram si cambia el texto y envia un archivo `.txt` por cada pagina leida correctamente.
+Este proyecto revisa paginas web privadas cada 15 minutos, avisa por Telegram si cambia el texto y envia un archivo `.txt` por cada pagina leida correctamente.
 
-Esta pensado para funcionar gratis con GitHub Actions en un repositorio publico. No necesitas tener tu ordenador encendido.
+Las URLs no estan escritas en el codigo ni en el README. Se guardan en GitHub Secrets para que el repositorio pueda seguir siendo publico sin mostrar las paginas monitorizadas.
 
-## Que paginas revisa
+## Como funciona
 
-Las paginas no estan escritas en el codigo para que no sean publicas.
-
-Se configuran en GitHub como un secret llamado `MONITOR_URLS_JSON`.
-
-Idealista puede mostrar verificacion de dispositivo. El script intenta abrir la pagina con navegador real usando Playwright. Si aun asi no puede leer el contenido real, avisa por Telegram y sigue revisando las otras paginas.
+1. cron-job.org lanza el workflow de GitHub Actions cada 15 minutos.
+2. GitHub Actions ejecuta `monitor.py`.
+3. El script lee las URLs desde el secret `MONITOR_URLS_JSON`.
+4. Cada pagina se descarga primero por HTTP normal y, si hace falta, con Chromium mediante Playwright.
+5. Si una pagina cambia, el bot envia un resumen por Telegram.
+6. Si una pagina se lee correctamente, el bot envia un `.txt` individual con el texto extraido.
+7. Si una pagina falla, el bot envia un error por Telegram y continua con las demas.
 
 ## Archivos importantes
 
-- `monitor.py`: el bot que revisa las paginas y envia mensajes.
-- `dump_urls_text.py`: archivo de prueba para imprimir el texto que se extrae de las paginas.
-- `requirements.txt`: librerias de Python necesarias.
-- `.github/workflows/monitor.yml`: workflow de GitHub Actions que se lanza manualmente o desde cron-job.org.
-- `.monitor_state/`: carpeta donde se guarda el ultimo texto conocido. No se sube a GitHub.
+- `monitor.py`: bot principal.
+- `dump_urls_text.py`: prueba local para ver el texto que se extrae de las paginas.
+- `requirements.txt`: dependencias de Python.
+- `.github/workflows/monitor.yml`: workflow de GitHub Actions lanzado manualmente o desde cron-job.org.
+- `.monitor_state/`: estado local de comparacion. No se sube a GitHub.
 
-## Paso 1: crear un repositorio publico en GitHub
+## Secrets necesarios en GitHub
 
-1. Entra en <https://github.com>.
-2. Pulsa `New repository`.
-3. Pon un nombre, por ejemplo `monitor-urls`.
-4. Marca `Public`.
-5. Crea el repositorio.
+Entra en tu repositorio:
 
-## Paso 2: subir estos archivos
-
-Desde esta carpeta, ejecuta:
-
-```powershell
-git init
-git add .
-git commit -m "Crear monitor de URLs con Telegram"
-git branch -M main
-git remote add origin https://github.com/TU_USUARIO/monitor-urls.git
-git push -u origin main
+```text
+Settings > Secrets and variables > Actions > New repository secret
 ```
 
-Cambia `TU_USUARIO` por tu usuario real de GitHub.
+Crea estos tres secrets:
 
-## Paso 3: crear los secretos de Telegram
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+MONITOR_URLS_JSON
+```
 
-No pongas el token del bot ni las URLs dentro del codigo.
+`TELEGRAM_BOT_TOKEN` es el token del bot de Telegram.
 
-En GitHub:
+`TELEGRAM_CHAT_ID` es el chat al que se enviaran los mensajes.
 
-1. Abre tu repositorio.
-2. Ve a `Settings`.
-3. En el menu izquierdo, abre `Secrets and variables`.
-4. Entra en `Actions`.
-5. Pulsa `New repository secret`.
-6. Crea este secreto:
-   - Nombre: `TELEGRAM_BOT_TOKEN`
-   - Valor: el token de tu bot de Telegram
-7. Pulsa otra vez `New repository secret`.
-8. Crea este secreto:
-   - Nombre: `TELEGRAM_CHAT_ID`
-   - Valor: tu chat id de Telegram
-9. Pulsa otra vez `New repository secret`.
-10. Crea este secreto:
-   - Nombre: `MONITOR_URLS_JSON`
-   - Valor: una lista JSON con las paginas privadas a revisar.
-
-Ejemplo de formato para `MONITOR_URLS_JSON`:
+`MONITOR_URLS_JSON` contiene las paginas privadas a revisar. Formato:
 
 ```json
 [
@@ -76,45 +52,46 @@ Ejemplo de formato para `MONITOR_URLS_JSON`:
     "expected_terms": ["palabra", "importante"]
   },
   {
-    "name": "Nombre pagina 2",
-    "url": "https://ejemplo.com/pagina-2",
-    "expected_terms": ["palabra", "importante"]
-  },
-  {
     "name": "Nombre pagina dificil",
-    "url": "https://ejemplo.com/pagina-3",
+    "url": "https://ejemplo.com/pagina-2",
     "expected_terms": ["palabra", "importante"],
     "strict_expected_terms": true
   }
 ]
 ```
 
-## Paso 4: probar manualmente en GitHub
+Campos:
 
-1. Entra en la pestana `Actions` de tu repositorio.
-2. Elige el workflow `Monitor URLs`.
+- `name`: nombre que se vera en Telegram y en el nombre del `.txt`.
+- `url`: URL privada que se monitoriza.
+- `expected_terms`: palabras que deberian aparecer en el texto.
+- `strict_expected_terms`: opcional. Si es `true`, la pagina se considera error si no aparecen esas palabras.
+
+## Probar manualmente en GitHub
+
+1. Entra en la pestana `Actions`.
+2. Abre el workflow `Monitor URLs`.
 3. Pulsa `Run workflow`.
 4. Espera a que termine.
-5. Mira los logs para comprobar que revisa las tres paginas.
+5. Comprueba Telegram.
 
-La primera ejecucion guarda una base inicial. Normalmente no envia aviso de cambio porque todavia no tiene una version anterior con la que comparar.
+La primera ejecucion crea una base inicial. Puede no enviar resumen de cambios, pero si enviara los `.txt` de las paginas que se hayan leido correctamente.
 
-## Paso 5: funcionamiento automatico
+## Configurar cron-job.org cada 15 minutos
 
-GitHub Actions no garantiza que los workflows programados se ejecuten exactamente cada 15 minutos. Para hacerlo mas fiable, usa cron-job.org para lanzar el workflow por API cada 15 minutos.
+GitHub Actions no garantiza que `schedule` se ejecute exactamente cada 15 minutos. Por eso este proyecto usa cron-job.org para lanzar el workflow mediante API.
 
-El workflow conserva `workflow_dispatch`, que permite lanzarlo desde fuera con una peticion HTTP.
+En cron-job.org crea un cron job:
 
-En cron-job.org crea un cron job asi:
-
-- Metodo: `POST`
+- Schedule: cada 15 minutos.
+- Method: `POST`.
 - URL:
 
 ```text
 https://api.github.com/repos/monica-calderon/monitor-urls/actions/workflows/monitor.yml/dispatches
 ```
 
-- Headers:
+Headers:
 
 ```text
 Accept: application/vnd.github+json
@@ -123,7 +100,7 @@ X-GitHub-Api-Version: 2022-11-28
 Content-Type: application/json
 ```
 
-- Body:
+Body:
 
 ```json
 {
@@ -131,87 +108,107 @@ Content-Type: application/json
 }
 ```
 
-El token de GitHub debe ser un token fino con permiso solo para este repositorio y con `Actions: Read and write`.
+## Crear el token de GitHub para cron-job.org
 
-Si una pagina cambia, recibiras un mensaje de Telegram con un resumen.
+Crea un fine-grained personal access token en GitHub:
 
-Si una pagina falla, por ejemplo porque Idealista pide verificacion, recibiras un mensaje de error y el bot seguira con las demas.
+```text
+GitHub > Settings > Developer settings > Personal access tokens > Fine-grained tokens
+```
 
-Despues de cada pagina leida correctamente, recibiras tambien un archivo `.txt` con el nombre de esa web y el texto extraido.
+Configuralo asi:
 
-## Control del limite gratuito
+- Repository access: solo `monica-calderon/monitor-urls`.
+- Permissions:
+  - `Actions`: `Read and write`.
+  - `Contents`: `Read-only`, si GitHub lo pide.
+- Caducidad: la que prefieras. Si caduca, cron-job.org dejara de lanzar el workflow.
 
-El repositorio debe mantenerse como `Public`.
+Copia el token y usalo en cron-job.org en el header:
 
-Segun la documentacion oficial de GitHub, GitHub Actions es gratis para repositorios publicos usando runners estandar de GitHub. Por eso se mantiene el escaneo cada 15 minutos.
+```text
+Authorization: Bearer TU_GITHUB_TOKEN
+```
 
-Calculo aproximado:
+No guardes este token en el repositorio.
 
-- Cada 15 minutos son unas 96 ejecuciones al dia.
-- En un repositorio publico, esas ejecuciones no consumen los minutos gratuitos de repositorios privados.
-- cron-job.org es gratuito y permite ejecutar cron jobs con intervalos personalizados.
-- Si algun dia cambias el repositorio a `Private`, revisa el consumo de minutos de GitHub Actions.
+## Que recibiras en Telegram
 
-## Probar en tu ordenador
+Por cada ejecucion real:
 
-Instala Python 3.12 o superior y ejecuta:
+- Si una web cambia: mensaje con resumen de cambios.
+- Si una web falla: mensaje de error con la URL para revisar manualmente.
+- Si una web se lee correctamente: archivo `.txt` con nombre identificativo.
+
+Cada `.txt` incluye:
+
+- Nombre.
+- URL.
+- Metodo usado (`http` o `browser`).
+- Estado (`baseline`, `unchanged` o `changed`).
+- Fecha UTC.
+- Texto extraido.
+
+Las webs con error no generan `.txt`.
+
+## Probar en local
+
+Instala dependencias:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python -m playwright install chromium
+```
+
+Prueba sin enviar nada real a Telegram:
+
+```powershell
 $env:MONITOR_URLS_JSON = '[{"name":"Nombre pagina","url":"https://ejemplo.com","expected_terms":["ejemplo"]}]'
 $env:DRY_RUN = "1"
 python monitor.py
 ```
 
-Con `DRY_RUN=1`, el script no envia mensajes ni archivos reales a Telegram. Solo los muestra por pantalla con una vista previa.
+Con `DRY_RUN=1`, el script imprime los mensajes y una vista previa de los `.txt`, pero no envia nada.
 
-Para probar el envio real localmente:
-
-```powershell
-$env:TELEGRAM_BOT_TOKEN = "TU_TOKEN"
-$env:TELEGRAM_CHAT_ID = "TU_CHAT_ID"
-$env:MONITOR_URLS_JSON = '[{"name":"Nombre pagina","url":"https://ejemplo.com","expected_terms":["ejemplo"]}]'
-python monitor.py
-```
-
-## Ver el texto extraido de las URLs
-
-Para ver en pantalla el texto que el bot consigue leer de cada pagina, usa:
+Para probar solo la extraccion de texto:
 
 ```powershell
 $env:MONITOR_URLS_JSON = '[{"name":"Nombre pagina","url":"https://ejemplo.com","expected_terms":["ejemplo"]}]'
 python dump_urls_text.py
 ```
 
-Este archivo no envia mensajes a Telegram y no compara cambios. Solo muestra el texto extraido.
+## Cambiar o anadir URLs
 
-## Como cambiar o anadir URLs
+No cambies `monitor.py` para anadir URLs.
 
-Cambia el secret `MONITOR_URLS_JSON` en GitHub.
+Cambia el secret `MONITOR_URLS_JSON` en GitHub:
 
-Cada pagina tiene este formato:
-
-```python
-{
-    "name": "Nombre que veras en Telegram",
-    "url": "https://ejemplo.com",
-    "expected_terms": ["palabra", "importante"],
-}
+```text
+Settings > Secrets and variables > Actions > MONITOR_URLS_JSON
 ```
 
-Si una pagina es dificil y quieres exigir que aparezcan esas palabras, anade:
+Despues ejecuta `Run workflow` para probarlo.
 
-```python
-"strict_expected_terms": True
-```
+## Privacidad
 
-## Notas importantes
+- Las URLs no estan en el codigo.
+- Las URLs no estan en el README.
+- Las URLs estan en `MONITOR_URLS_JSON`.
+- Los logs publicos ocultan la URL cuando hay errores.
+- Los mensajes privados de Telegram y los `.txt` si incluyen la URL.
 
-- GitHub Actions gratis funciona muy bien para este caso si el repositorio es publico.
-- GitHub no garantiza que el minuto exacto sea siempre perfecto; por eso el disparador recomendado es cron-job.org.
+## Coste
+
+El repositorio debe mantenerse como `Public`.
+
+En repositorios publicos, GitHub Actions con runners estandar no consume los minutos gratuitos de repositorios privados. cron-job.org tambien es gratuito para este uso.
+
+Si algun dia cambias el repositorio a `Private`, revisa el consumo de minutos de GitHub Actions.
+
+## Notas
+
+- Idealista puede bloquear el acceso automatico con verificacion de dispositivo. En ese caso el bot avisara por Telegram y seguira con las demas paginas.
 - El estado se guarda con cache de GitHub Actions. Si GitHub borra la cache, la siguiente ejecucion creara una nueva base inicial.
-- El token de Telegram y las URLs deben estar solo en GitHub Secrets o en variables de entorno locales.
-- Los logs publicos no muestran las URLs cuando hay error; el mensaje privado de Telegram si incluye la URL.
+- Si cron-job.org deja de ejecutar, revisa que el token de GitHub no haya caducado.
