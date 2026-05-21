@@ -1,0 +1,8 @@
+.monitor_state/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+playwright-report/
+test-results/
