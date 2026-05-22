@@ -456,6 +456,31 @@ def extract_text_for_url(html: str | bytes, url: str) -> str:
     return clean_text(html)
 
 
+def apply_stealth_if_available(page: object) -> None:
+    try:
+        from playwright_stealth import Stealth
+
+        Stealth().apply_stealth_sync(page)
+        return
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f"No se pudo aplicar playwright-stealth Stealth: {exc}", file=sys.stderr)
+        return
+
+    try:
+        from playwright_stealth import stealth_sync
+
+        stealth_sync(page)
+    except ImportError:
+        print(
+            "playwright-stealth no esta instalado; se continua sin stealth.",
+            file=sys.stderr,
+        )
+    except Exception as exc:
+        print(f"No se pudo aplicar playwright-stealth: {exc}", file=sys.stderr)
+
+
 def fetch_with_http(url: str) -> FetchResult:
     headers = {
         "User-Agent": USER_AGENT,
@@ -489,11 +514,10 @@ def fetch_with_http(url: str) -> FetchResult:
 def fetch_with_browser_mode(url: str, java_script_enabled: bool) -> FetchResult:
     try:
         from playwright.sync_api import sync_playwright
-        from playwright_stealth import Stealth
     except Exception as exc:  # pragma: no cover - depends on optional browser install
         raise RuntimeError(
-            "Playwright o playwright-stealth no estan instalados o Chromium no esta disponible. "
-            "Ejecuta: pip install playwright playwright-stealth && python -m playwright install chromium"
+            "Playwright no esta instalado o Chromium no esta disponible. "
+            "Ejecuta: pip install playwright && python -m playwright install chromium"
         ) from exc
 
     method = "browser" if java_script_enabled else "browser_no_js"
@@ -521,7 +545,7 @@ def fetch_with_browser_mode(url: str, java_script_enabled: bool) -> FetchResult:
         )
 
         page = context.new_page()
-        Stealth().apply_stealth_sync(page)
+        apply_stealth_if_available(page)
 
         try:
             response = page.goto(
@@ -591,10 +615,7 @@ def fetch_page(config: dict[str, object]) -> FetchResult:
     errors = []
     results = []
 
-    if is_idealista_url(url):
-        fetchers = (fetch_with_browser, fetch_with_http)
-    else:
-        fetchers = (fetch_with_http, fetch_with_browser, fetch_with_browser_no_js)
+    fetchers = (fetch_with_http, fetch_with_browser, fetch_with_browser_no_js)
 
     for fetcher in fetchers:
         try:
@@ -605,9 +626,10 @@ def fetch_page(config: dict[str, object]) -> FetchResult:
             lacks_expected_terms = expected_terms and not has_expected_terms(
                 result.text, expected_terms
             )
+            is_useful_listing = has_useful_listing_content(result.text, url)
 
             if not is_too_short and not is_blocked and not (
-                strict_expected_terms and lacks_expected_terms
+                strict_expected_terms and lacks_expected_terms and not is_useful_listing
             ):
                 return result
 
@@ -616,7 +638,7 @@ def fetch_page(config: dict[str, object]) -> FetchResult:
                 reason_parts.append("texto demasiado corto")
             if is_blocked:
                 reason_parts.append("posible bloqueo/verificacion")
-            if strict_expected_terms and lacks_expected_terms:
+            if strict_expected_terms and lacks_expected_terms and not is_useful_listing:
                 reason_parts.append("no aparecen los terminos esperados")
             errors.append(f"{result.method}: {', '.join(reason_parts)}")
         except Exception as exc:
@@ -1141,11 +1163,10 @@ def write_text_report(
 def capture_error_screenshot(url: str, name: str, directory: Path) -> Path:
     try:
         from playwright.sync_api import sync_playwright
-        from playwright_stealth import stealth_sync
     except Exception as exc:  # pragma: no cover - depends on optional browser install
         raise RuntimeError(
-            "Playwright o playwright-stealth no estan instalados o Chromium no esta disponible. "
-            "Ejecuta: pip install playwright playwright-stealth && python -m playwright install chromium"
+            "Playwright no esta instalado o Chromium no esta disponible. "
+            "Ejecuta: pip install playwright && python -m playwright install chromium"
         ) from exc
 
     path = directory / f"screenshot-{slugify(name)}.png"
@@ -1167,7 +1188,7 @@ def capture_error_screenshot(url: str, name: str, directory: Path) -> Path:
             ],
         )
         page = context.new_page()
-        stealth_sync(page)
+        apply_stealth_if_available(page)
         try:
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
