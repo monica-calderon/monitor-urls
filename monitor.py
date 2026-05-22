@@ -1109,6 +1109,44 @@ def send_debug_summary(
     try_send_telegram(message)
 
 
+def reactivate_manual_urls_for_debug(
+    configs: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[str]]:
+    updated_configs: list[dict[str, object]] = []
+    reactivated_names: list[str] = []
+
+    for config in configs:
+        updated_config = dict(config)
+        if updated_config.get("mode") == "manual_summary":
+            updated_config["mode"] = "auto"
+            reactivated_names.append(str(updated_config["name"]))
+        updated_configs.append(updated_config)
+
+    return updated_configs, reactivated_names
+
+
+def mark_urls_as_manual_after_errors(
+    configs: list[dict[str, object]],
+    failed_urls: set[str],
+) -> tuple[list[dict[str, object]], list[str]]:
+    updated_configs: list[dict[str, object]] = []
+    manual_names: list[str] = []
+
+    for config in configs:
+        updated_config = dict(config)
+        url = normalize_url(str(updated_config["url"]))
+        if url in failed_urls and updated_config.get("mode", "auto") != "manual_summary":
+            updated_config["mode"] = "manual_summary"
+            manual_names.append(str(updated_config["name"]))
+        updated_configs.append(updated_config)
+
+    return updated_configs, manual_names
+
+
+def format_name_list(names: list[str]) -> str:
+    return "\n".join(f"- {name}" for name in names)
+
+
 def clean_error_detail(error: Exception) -> str:
     detail = str(error).splitlines()[0]
     detail = detail.split(" | browser:", 1)[0]
@@ -1328,6 +1366,30 @@ def main() -> int:
                 f"🧾 Detalle: {detail}"
             )
 
+    if debug_mode:
+        url_configs, reactivated_names = reactivate_manual_urls_for_debug(url_configs)
+        if reactivated_names:
+            try:
+                update_monitor_urls_secret(url_configs)
+                try_send_telegram(
+                    "🔄 URLs reactivadas en debug\n\n"
+                    f"{format_name_list(reactivated_names)}\n\n"
+                    "Se monitorizaran en esta ejecucion."
+                )
+            except Exception as exc:
+                detail = clean_error_detail(exc)
+                print(
+                    "No se pudo persistir la reactivacion de URLs manuales.",
+                    file=sys.stderr,
+                )
+                try_send_telegram(
+                    "⚠️ No se pudo guardar la reactivacion de URLs manuales\n\n"
+                    f"{format_name_list(reactivated_names)}\n\n"
+                    f"🧾 Detalle: {detail}\n\n"
+                    "Se monitorizaran en este debug, pero seguiran en modo manual "
+                    "si el secret no se actualiza."
+                )
+
     if not debug_mode and not is_monitoring_window(now_madrid):
         print(
             "Fuera de ventana de monitorizacion "
@@ -1340,6 +1402,7 @@ def main() -> int:
     state_has_changes = False
     results = []
     debug_items: list[dict[str, object]] = []
+    failed_urls_for_manual: set[str] = set()
 
     with TemporaryDirectory() as temp_dir:
         report_dir = Path(temp_dir)
@@ -1454,7 +1517,35 @@ def main() -> int:
                         "⏰ Recordatorio de error de monitorizacion\n\n"
                         + telegram_error_message
                     )
+                if not debug_mode:
+                    failed_urls_for_manual.add(normalize_url(str(config["url"])))
                 results.append({"name": name, "status": "error", "error": str(exc)})
+
+    if not debug_mode and failed_urls_for_manual:
+        updated_url_configs, manual_names = mark_urls_as_manual_after_errors(
+            url_configs,
+            failed_urls_for_manual,
+        )
+        if manual_names:
+            try:
+                update_monitor_urls_secret(updated_url_configs)
+                try_send_telegram(
+                    "👀 URLs pasadas a modo manual\n\n"
+                    f"{format_name_list(manual_names)}\n\n"
+                    "No se volveran a monitorizar automaticamente hasta el proximo debug."
+                )
+            except Exception as exc:
+                detail = clean_error_detail(exc)
+                print(
+                    "No se pudo pasar a modo manual las URLs con error.",
+                    file=sys.stderr,
+                )
+                try_send_telegram(
+                    "⚠️ No se pudo guardar el modo manual de URLs con error\n\n"
+                    f"{format_name_list(manual_names)}\n\n"
+                    f"🧾 Detalle: {detail}\n\n"
+                    "Podrian volver a ejecutarse en la proxima ejecucion normal."
+                )
 
     if state_has_changes:
         try:

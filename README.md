@@ -169,15 +169,16 @@ La primera ejecucion crea una base inicial. En `normal` puede no enviar resumen 
 - Si una web no cambia, no envia `.txt`.
 - Si una web cambia, envia alerta con `Antes` y `Despues`, y adjunta el `.txt`.
 - Si hay errores, solo envia recordatorio si la ejecucion ocurre entre las 12:00 y las 12:15.
+- Si una web da error, al final la pasa a `manual_summary` en `MONITOR_URLS_JSON` para no volver a monitorizarla automaticamente.
 - Al final, actualiza `MONITOR_STATE_JSON` con el estado actual de las webs leidas correctamente.
 
 `debug`:
 
 - Se elige manualmente desde GitHub Actions.
 - Ejecuta siempre, tambien fuera del horario 08:00-22:00.
+- Al empezar, reactiva todas las URLs en `manual_summary` cambiandolas a `auto` en `MONITOR_URLS_JSON`.
 - Al final de la ejecucion, envia un unico `Resumen debug` con todas las URLs, metodo, estado y codigo de respuesta si existe.
 - Envia `.txt` de todas las webs leidas correctamente.
-- Informa tambien de URLs en `manual_summary`.
 - Tambien actualiza `MONITOR_STATE_JSON`, igual que `normal`.
 
 ## Configurar cron-job.org cada 15 minutos
@@ -257,10 +258,10 @@ Por cada ejecucion real:
 - Los mensajes usan emojis y secciones visuales para distinguir cambios, errores, URLs manuales y archivos.
 - Si una web cambia: mensaje de alerta con `Antes` y `Despues`.
 - Si una web falla en `debug`: aparece en el `Resumen debug` final con la URL y el detalle seguro. Si Playwright puede abrir algo, tambien envia un PNG con la captura visible de la pagina.
-- Si una web falla en `normal`: recordatorio solo entre las 12:00 y las 12:15. En esa misma ventana tambien intenta enviar la captura PNG del error.
+- Si una web falla en `normal`: recordatorio solo entre las 12:00 y las 12:15. En esa misma ventana tambien intenta enviar la captura PNG del error. Al final envia un resumen con las URLs pasadas a modo manual.
 - Si una web se lee correctamente en `debug`: archivo `.txt` con nombre identificativo.
 - Si una web cambia en `normal`: archivo `.txt` con nombre identificativo.
-- Si una web esta en `manual_summary`: en `debug`, aparece en el resumen final; en `normal`, solo queda registrado en logs.
+- Si una web esta en `manual_summary`: en `normal`, solo queda registrado en logs; en el proximo `debug`, se reactiva y se monitoriza.
 
 Cada `.txt` incluye:
 
