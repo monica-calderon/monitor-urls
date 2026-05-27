@@ -5,6 +5,7 @@ load_dotenv()
 
 import os
 
+import atexit
 import difflib
 import base64
 import hashlib
@@ -51,10 +52,12 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-PLAYWRIGHT_PROFILE_DIR = Path(os.getenv("PLAYWRIGHT_PROFILE_DIR", ".playwright-profile"))
 HEADLESS = os.getenv("HEADLESS", "true").strip().lower() in {"1", "true", "yes", "si"}
 SLOW_MO_MS = int(os.getenv("SLOW_MO_MS", "0"))
-PAGE_LOAD_TIMEOUT_MS = int(os.getenv("PAGE_LOAD_TIMEOUT_MS", "60000"))
+HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "15"))
+PAGE_LOAD_TIMEOUT_MS = int(os.getenv("PAGE_LOAD_TIMEOUT_MS", "30000"))
+BROWSER_SETTLE_MS = int(os.getenv("BROWSER_SETTLE_MS", "1500"))
+SCREENSHOT_SETTLE_MS = int(os.getenv("SCREENSHOT_SETTLE_MS", "1500"))
 
 
 BLOCKED_MARKERS = [
@@ -487,7 +490,11 @@ def fetch_with_http(url: str) -> FetchResult:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
     }
-    with httpx.Client(headers=headers, follow_redirects=True, timeout=30) as client:
+    with httpx.Client(
+        headers=headers,
+        follow_redirects=True,
+        timeout=HTTP_TIMEOUT_SECONDS,
+    ) as client:
         response = client.get(url)
         text = extract_text_for_url(response.content, url)
         if response.is_error and not has_useful_listing_content(text, url):
@@ -511,77 +518,127 @@ def fetch_with_http(url: str) -> FetchResult:
         )
 
 
-def fetch_with_browser_mode(url: str, java_script_enabled: bool) -> FetchResult:
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception as exc:  # pragma: no cover - depends on optional browser install
-        raise RuntimeError(
-            "Playwright no esta instalado o Chromium no esta disponible. "
-            "Ejecuta: pip install playwright && python -m playwright install chromium"
-        ) from exc
+class BrowserSession:
+    def __init__(self) -> None:
+        self.playwright = None
+        self.browser = None
+        self.contexts: dict[bool, object] = {}
 
-    method = "browser" if java_script_enabled else "browser_no_js"
-    title = ""
-    final_url = url
-    response_status: int | None = None
+    def _ensure_browser(self):
+        if self.browser:
+            return self.browser
 
-    PLAYWRIGHT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:  # pragma: no cover - depends on optional browser install
+            raise RuntimeError(
+                "Playwright no esta instalado o Chromium no esta disponible. "
+                "Ejecuta: pip install playwright && python -m playwright install chromium"
+            ) from exc
 
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            str(PLAYWRIGHT_PROFILE_DIR),
+        self.playwright = sync_playwright().start()
+        self.browser = self.playwright.chromium.launch(
             headless=HEADLESS,
             slow_mo=SLOW_MO_MS,
-            user_agent=USER_AGENT,
-            locale="es-ES",
-            timezone_id="Europe/Madrid",
-            viewport={"width": 1366, "height": 900},
-            java_script_enabled=java_script_enabled,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
             ],
         )
+        return self.browser
 
-        page = context.new_page()
-        apply_stealth_if_available(page)
-
-        try:
-            response = page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=PAGE_LOAD_TIMEOUT_MS,
+    def context(self, java_script_enabled: bool):
+        if java_script_enabled not in self.contexts:
+            browser = self._ensure_browser()
+            self.contexts[java_script_enabled] = browser.new_context(
+                user_agent=USER_AGENT,
+                locale="es-ES",
+                timezone_id="Europe/Madrid",
+                viewport={"width": 1366, "height": 900},
+                java_script_enabled=java_script_enabled,
             )
-            response_status = response.status if response else None
-            page.wait_for_timeout(8_000)
+        return self.contexts[java_script_enabled]
 
-            for selector in [
-                "button:has-text('Aceptar')",
-                "button:has-text('Aceptar todo')",
-                "button:has-text('Consentir')",
-                "button:has-text('Guardar configuración')",
-                "button:has-text('Guardar configuracion')",
-                "button:has-text('Rechazar')",
-            ]:
-                try:
-                    locator = page.locator(selector)
-                    if locator.count() > 0:
-                        locator.first.click(timeout=3_000)
-                        page.wait_for_timeout(2_000)
-                        break
-                except Exception:
-                    pass
+    def close(self) -> None:
+        for context in list(self.contexts.values()):
+            try:
+                context.close()
+            except Exception:
+                pass
+        self.contexts.clear()
 
-            for _ in range(5):
-                page.mouse.wheel(0, 1200)
-                page.wait_for_timeout(1_000)
+        if self.browser:
+            try:
+                self.browser.close()
+            except Exception:
+                pass
+            self.browser = None
 
-            title = page.title()
-            final_url = page.url
-            html = page.content()
-        finally:
-            context.close()
+        if self.playwright:
+            try:
+                self.playwright.stop()
+            except Exception:
+                pass
+            self.playwright = None
+
+
+_BROWSER_SESSION = BrowserSession()
+atexit.register(_BROWSER_SESSION.close)
+
+
+def accept_cookie_banner(page) -> None:
+    for selector in [
+        "button:has-text('Aceptar')",
+        "button:has-text('Aceptar todo')",
+        "button:has-text('Consentir')",
+        "button:has-text('Guardar configuración')",
+        "button:has-text('Guardar configuracion')",
+        "button:has-text('Rechazar')",
+    ]:
+        try:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                locator.first.click(timeout=1_000)
+                page.wait_for_timeout(500)
+                break
+        except Exception:
+            pass
+
+
+def scroll_page_briefly(page) -> None:
+    for _ in range(2):
+        page.mouse.wheel(0, 1200)
+        page.wait_for_timeout(500)
+
+
+def fetch_with_browser_mode(url: str, java_script_enabled: bool) -> FetchResult:
+    method = "browser" if java_script_enabled else "browser_no_js"
+    title = ""
+    final_url = url
+    response_status: int | None = None
+    html = ""
+
+    context = _BROWSER_SESSION.context(java_script_enabled)
+    page = context.new_page()
+    apply_stealth_if_available(page)
+
+    try:
+        response = page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=PAGE_LOAD_TIMEOUT_MS,
+        )
+        response_status = response.status if response else None
+        page.wait_for_timeout(BROWSER_SETTLE_MS)
+        accept_cookie_banner(page)
+        scroll_page_briefly(page)
+
+        title = page.title()
+        final_url = page.url
+        html = page.content()
+    finally:
+        page.close()
 
     text = extract_text_for_url(html, url)
     detail = f"Titulo: {title}. URL final: {final_url}. Longitud texto: {len(text)}."
@@ -1199,43 +1256,19 @@ def write_text_report(
 
 
 def capture_error_screenshot(url: str, name: str, directory: Path) -> Path:
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception as exc:  # pragma: no cover - depends on optional browser install
-        raise RuntimeError(
-            "Playwright no esta instalado o Chromium no esta disponible. "
-            "Ejecuta: pip install playwright && python -m playwright install chromium"
-        ) from exc
-
     path = directory / f"screenshot-{slugify(name)}.png"
-    PLAYWRIGHT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            str(PLAYWRIGHT_PROFILE_DIR),
-            headless=HEADLESS,
-            slow_mo=SLOW_MO_MS,
-            user_agent=USER_AGENT,
-            locale="es-ES",
-            timezone_id="Europe/Madrid",
-            viewport={"width": 1366, "height": 900},
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
-        page = context.new_page()
-        apply_stealth_if_available(page)
+    context = _BROWSER_SESSION.context(java_script_enabled=True)
+    page = context.new_page()
+    apply_stealth_if_available(page)
+    try:
         try:
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
-                page.wait_for_timeout(5_000)
-            except Exception:
-                page.wait_for_timeout(1_000)
-            page.screenshot(path=str(path), full_page=True)
-        finally:
-            context.close()
+            page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+            page.wait_for_timeout(SCREENSHOT_SETTLE_MS)
+        except Exception:
+            page.wait_for_timeout(1_000)
+        page.screenshot(path=str(path), full_page=True)
+    finally:
+        page.close()
 
     return path
 
