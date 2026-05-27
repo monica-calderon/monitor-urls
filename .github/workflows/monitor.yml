@@ -18,9 +18,6 @@ on:
 permissions:
   contents: read
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 concurrency:
   group: monitor-urls
   cancel-in-progress: false
@@ -32,16 +29,16 @@ jobs:
 
     steps:
       - name: Descargar el codigo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Preparar Python
         id: setup-python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Restaurar estado anterior
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .monitor_state
           key: monitor-state-${{ github.run_id }}
@@ -50,14 +47,14 @@ jobs:
 
       - name: Restaurar entorno Python
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .venv
           key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
 
       - name: Restaurar Chromium de Playwright
         id: cache-playwright
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
