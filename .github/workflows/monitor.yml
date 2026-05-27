@@ -35,10 +35,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Preparar Python
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
 
       - name: Restaurar estado anterior
         uses: actions/cache@v4
@@ -48,11 +48,30 @@ jobs:
           restore-keys: |
             monitor-state-
 
+      - name: Restaurar entorno Python
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Restaurar Chromium de Playwright
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
+
       - name: Instalar dependencias
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt
+
+      - name: Instalar Chromium de Playwright
+        if: steps.cache-playwright.outputs.cache-hit != 'true' || steps.cache-venv.outputs.cache-hit != 'true'
+        run: .venv/bin/python -m playwright install --with-deps chromium
 
       - name: Ejecutar monitor
         env:
@@ -64,4 +83,4 @@ jobs:
           GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
           MONITOR_URLS_JSON: ${{ secrets.MONITOR_URLS_JSON }}
           MONITOR_STATE_JSON: ${{ secrets.MONITOR_STATE_JSON }}
-        run: python monitor.py
+        run: .venv/bin/python monitor.py
