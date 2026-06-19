@@ -11,11 +11,13 @@ import base64
 import hashlib
 import html
 import json
+import mimetypes
 import os
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.header import Header
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Iterable
@@ -845,6 +847,14 @@ def strip_markup_for_ntfy(message: str) -> str:
     return html.unescape(without_tags)
 
 
+def encode_ntfy_header(value: str) -> str:
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return Header(value, "utf-8").encode()
+    return value
+
+
 class TelegramClient:
     name = "telegram"
 
@@ -854,6 +864,9 @@ class TelegramClient:
     def send_message(self, message: str) -> None:
         send_telegram(message, self.settings)
 
+    def send_document(self, path: Path, caption: str) -> None:
+        send_telegram_document(path, caption, self.settings)
+
 
 class NtfyClient:
     name = "ntfy"
@@ -862,8 +875,7 @@ class NtfyClient:
         self.settings = settings
         self.session = session
 
-    def send_message(self, message: str) -> None:
-        payload = strip_markup_for_ntfy(message)
+    def _request_options(self) -> tuple[dict[str, str], tuple[str, str] | None]:
         headers: dict[str, str] = {}
         auth: tuple[str, str] | None = None
         if self.settings.token:
@@ -874,6 +886,11 @@ class NtfyClient:
             headers["Priority"] = self.settings.priority
         if self.settings.tags:
             headers["Tags"] = self.settings.tags
+        return headers, auth
+
+    def send_message(self, message: str) -> None:
+        payload = strip_markup_for_ntfy(message)
+        headers, auth = self._request_options()
 
         if DRY_RUN and self.session is None:
             print("\n--- MENSAJE NTFY DRY_RUN ---")
@@ -896,6 +913,47 @@ class NtfyClient:
             response = client.post(
                 self.settings.publish_url,
                 content=payload,
+                headers=headers,
+                auth=auth,
+            )
+            response.raise_for_status()
+
+    def send_document(self, path: Path, caption: str) -> None:
+        headers, auth = self._request_options()
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        headers.update(
+            {
+                "Filename": path.name,
+                "Message": encode_ntfy_header(strip_markup_for_ntfy(caption)),
+                "Content-Type": content_type,
+            }
+        )
+
+        if DRY_RUN and self.session is None:
+            print("\n--- DOCUMENTO NTFY DRY_RUN ---")
+            print(f"URL: {self.settings.publish_url}")
+            print(f"Archivo: {path.name}")
+            print(f"Caption: {strip_markup_for_ntfy(caption)}")
+            if path.exists():
+                print(f"Tamano aproximado: {path.stat().st_size} bytes")
+            print("--- FIN DOCUMENTO ---\n")
+            return
+
+        content = path.read_bytes()
+        if self.session is not None:
+            response = self.session.put(
+                self.settings.publish_url,
+                content=content,
+                headers=headers,
+                auth=auth,
+            )
+            response.raise_for_status()
+            return
+
+        with httpx.Client(timeout=60) as client:
+            response = client.put(
+                self.settings.publish_url,
+                content=content,
                 headers=headers,
                 auth=auth,
             )
@@ -931,6 +989,33 @@ class NotificationRouter:
                 )
                 if channel_name == "ntfy":
                     print("Error claro de Ntfy: fallo el envio HTTP POST.", file=sys.stderr)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def send_document(self, path: Path, caption: str) -> None:
+        if not self.clients:
+            print("Notificaciones no configuradas: no hay canales disponibles.")
+            print(f"No se envio el documento {path.name}")
+            return
+
+        print(f"Enviando documento por: {', '.join(self.channel_names)}")
+        errors: list[str] = []
+        for client in self.clients:
+            channel_name = str(getattr(client, "name", "desconocido"))
+            try:
+                client.send_document(path, caption)
+                print(f"Documento enviado por {channel_name}.")
+            except Exception as exc:
+                errors.append(f"{channel_name}: {exc}")
+                print(
+                    f"No se pudo enviar el documento por {channel_name}: {exc}",
+                    file=sys.stderr,
+                )
+                if channel_name == "ntfy":
+                    print(
+                        "Error claro de Ntfy: fallo el envio HTTP PUT del adjunto.",
+                        file=sys.stderr,
+                    )
         if errors:
             raise RuntimeError("; ".join(errors))
 
@@ -1044,7 +1129,12 @@ def send_telegram(
             response.raise_for_status()
 
 
-def send_telegram_document(path: Path, caption: str) -> None:
+def send_telegram_document(
+    path: Path,
+    caption: str,
+    settings: TelegramSettings | None = None,
+) -> None:
+    settings = settings or TelegramSettings(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
     is_text_document = path.suffix.lower() == ".txt"
     content_type = "text/plain" if is_text_document else "image/png"
 
@@ -1061,17 +1151,17 @@ def send_telegram_document(path: Path, caption: str) -> None:
         print("--- FIN DOCUMENTO ---\n")
         return
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not settings.bot_token or not settings.chat_id:
         print("Telegram no configurado: faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
         print(f"No se envio el documento {path.name}")
         return
 
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    api_url = f"https://api.telegram.org/bot{settings.bot_token}/sendDocument"
     with httpx.Client(timeout=60) as client:
         with path.open("rb") as document:
             response = client.post(
                 api_url,
-                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
+                data={"chat_id": settings.chat_id, "caption": caption},
                 files={"document": (path.name, document, content_type)},
             )
             response.raise_for_status()
@@ -1128,11 +1218,15 @@ def try_send_message(message: str) -> None:
         )
 
 
-def try_send_telegram_document(path: Path, caption: str) -> None:
+def send_document(path: Path, caption: str) -> None:
+    build_notification_router().send_document(path, caption)
+
+
+def try_send_document(path: Path, caption: str) -> None:
     try:
-        send_telegram_document(path, caption)
+        send_document(path, caption)
     except Exception as exc:
-        print(f"No se pudo enviar el documento de Telegram: {exc}", file=sys.stderr)
+        print(f"No se pudo enviar el documento: {exc}", file=sys.stderr)
         print(
             "El documento no se muestra en logs para no publicar URLs privadas.",
             file=sys.stderr,
@@ -1725,7 +1819,7 @@ def main() -> int:
                         now_madrid,
                         text,
                     )
-                    try_send_telegram_document(
+                    try_send_document(
                         report_path,
                         f"📄 Texto extraido de {name} ({result['status']})",
                     )
@@ -1742,7 +1836,7 @@ def main() -> int:
                             name,
                             report_dir,
                         )
-                        try_send_telegram_document(
+                        try_send_document(
                             screenshot_path,
                             f"🖼️ Screenshot de error: {name}",
                         )

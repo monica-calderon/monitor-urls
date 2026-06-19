@@ -1,6 +1,6 @@
 # Monitor de URLs con Telegram y Ntfy
 
-Este proyecto revisa paginas web privadas cada 15 minutos, avisa por Telegram, Ntfy o ambos si cambia el texto y envia un archivo `.txt` por cada pagina leida correctamente cuando Telegram esta activo.
+Este proyecto revisa paginas web privadas cada 15 minutos, avisa por Telegram, Ntfy o ambos si cambia el texto y envia un archivo `.txt` por cada pagina leida correctamente en los canales activos.
 
 Las URLs no estan escritas en el codigo ni en el README. Se guardan en GitHub Secrets para que el repositorio pueda seguir siendo publico sin mostrar las paginas monitorizadas.
 
@@ -54,7 +54,7 @@ MONITOR_STATE_JSON
 
 ## Notificaciones
 
-El bot puede enviar avisos por Telegram, Ntfy o ambos. Telegram sigue usandose para leer URLs nuevas desde el chat y para enviar documentos `.txt` o screenshots. Ntfy recibe los mensajes de texto en texto plano.
+El bot puede enviar avisos por Telegram, Ntfy o ambos. Telegram sigue usandose para leer URLs nuevas desde el chat. Los mensajes, documentos `.txt` y screenshots se envian por los canales activos; Ntfy recibe los mensajes y captions en texto plano.
 
 Configura el modo con:
 
@@ -300,7 +300,7 @@ Por cada ejecucion real:
 - Si una web cambia en `normal`: archivo `.txt` con nombre identificativo.
 - Si una web esta en `manual_summary`: en `normal`, solo queda registrado en logs; en el proximo `debug`, se reactiva y se monitoriza.
 
-Los mensajes de texto se envian por los canales activos segun `NTFY_METHOD`. Los documentos `.txt` y screenshots se envian por Telegram.
+Los mensajes de texto, documentos `.txt` y screenshots se envian por los canales activos segun `NTFY_METHOD`.
 
 Cada `.txt` incluye:
 
@@ -311,7 +311,7 @@ Cada `.txt` incluye:
 - Fecha Madrid.
 - Texto extraido.
 
-Las webs con error no generan `.txt`. Las screenshots de error se guardan solo en una carpeta temporal durante la ejecucion y se envian unicamente por Telegram; no se suben como artifacts ni quedan en el repositorio.
+Las webs con error no generan `.txt`. Las screenshots de error se guardan solo en una carpeta temporal durante la ejecucion y se envian por los canales activos; no se suben como artifacts ni quedan en el repositorio.
 
 ## Probar en local
 
