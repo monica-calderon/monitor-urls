@@ -83,6 +83,8 @@ NTFY_TAGS
 
 `NTFY_TOKEN`, `NTFY_USERNAME` y `NTFY_PASSWORD` son opcionales. Usa token si tu servidor Ntfy lo requiere; si no hay token, el bot puede usar usuario y password.
 
+Las notificaciones enviadas por Ntfy incluyen un boton `Eliminar` para borrar esa notificacion. Los avisos de `Cambio detectado` tambien incluyen `Abrir web` para abrir directamente la pagina modificada.
+
 En GitHub Actions, usa repository variables para `NTFY_METHOD`, `NTFY_SERVER`, `NTFY_PRIORITY` y `NTFY_TAGS`, y secrets para `NTFY_TOPIC`, `NTFY_TOKEN`, `NTFY_USERNAME` y `NTFY_PASSWORD` si contienen datos privados.
 
 `MONITOR_URLS_JSON` contiene las paginas privadas a revisar. Formato:

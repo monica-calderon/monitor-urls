@@ -15,6 +15,7 @@ import mimetypes
 import os
 import re
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.header import Header
@@ -842,6 +843,11 @@ class NotificationSettings:
     ntfy: NtfySettings
 
 
+@dataclass(frozen=True)
+class NotificationOptions:
+    open_url: str | None = None
+
+
 def strip_markup_for_ntfy(message: str) -> str:
     without_tags = re.sub(r"<[^>]+>", "", message)
     return html.unescape(without_tags)
@@ -855,13 +861,24 @@ def encode_ntfy_header(value: str) -> str:
     return value
 
 
+def quote_ntfy_action_value(value: str) -> str:
+    if not value or any(character in value for character in {",", ";", " ", '"', "'"}):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
 class TelegramClient:
     name = "telegram"
 
     def __init__(self, settings: TelegramSettings) -> None:
         self.settings = settings
 
-    def send_message(self, message: str) -> None:
+    def send_message(
+        self,
+        message: str,
+        options: NotificationOptions | None = None,
+    ) -> None:
         send_telegram(message, self.settings)
 
     def send_document(self, path: Path, caption: str) -> None:
@@ -888,13 +905,74 @@ class NtfyClient:
             headers["Tags"] = self.settings.tags
         return headers, auth
 
-    def send_message(self, message: str) -> None:
+    def _authorization_header(self) -> str:
+        if self.settings.token:
+            return f"Bearer {self.settings.token}"
+        if self.settings.username or self.settings.password:
+            credentials = f"{self.settings.username}:{self.settings.password}"
+            encoded = base64.b64encode(credentials.encode("utf-8")).decode("ascii")
+            return f"Basic {encoded}"
+        return ""
+
+    def _delete_action(self, sequence_id: str) -> str:
+        delete_url = f"{self.settings.publish_url.rstrip('/')}/{sequence_id}"
+        action_parts = [
+            "action=http",
+            "label=Eliminar",
+            f"url={quote_ntfy_action_value(delete_url)}",
+            "method=DELETE",
+            "clear=true",
+        ]
+        authorization = self._authorization_header()
+        if authorization:
+            action_parts.insert(
+                4,
+                f"headers.Authorization={quote_ntfy_action_value(authorization)}",
+            )
+        return ", ".join(action_parts)
+
+    def _actions_header(
+        self,
+        sequence_id: str,
+        options: NotificationOptions | None = None,
+    ) -> str:
+        actions = []
+        if options and options.open_url:
+            actions.append(
+                ", ".join(
+                    [
+                        "action=view",
+                        "label=Abrir web",
+                        f"url={quote_ntfy_action_value(options.open_url)}",
+                        "clear=true",
+                    ]
+                )
+            )
+        actions.append(self._delete_action(sequence_id))
+        return encode_ntfy_header("; ".join(actions))
+
+    def _add_action_headers(
+        self,
+        headers: dict[str, str],
+        options: NotificationOptions | None = None,
+    ) -> None:
+        sequence_id = f"monitor-urls-{uuid.uuid4().hex}"
+        headers["X-Sequence-ID"] = sequence_id
+        headers["Actions"] = self._actions_header(sequence_id, options)
+
+    def send_message(
+        self,
+        message: str,
+        options: NotificationOptions | None = None,
+    ) -> None:
         payload = strip_markup_for_ntfy(message)
         headers, auth = self._request_options()
+        self._add_action_headers(headers, options)
 
         if DRY_RUN and self.session is None:
             print("\n--- MENSAJE NTFY DRY_RUN ---")
             print(f"URL: {self.settings.publish_url}")
+            print(f"Actions: {headers['Actions']}")
             print(payload)
             print("--- FIN MENSAJE ---\n")
             return
@@ -928,10 +1006,12 @@ class NtfyClient:
                 "Content-Type": content_type,
             }
         )
+        self._add_action_headers(headers)
 
         if DRY_RUN and self.session is None:
             print("\n--- DOCUMENTO NTFY DRY_RUN ---")
             print(f"URL: {self.settings.publish_url}")
+            print(f"Actions: {headers['Actions']}")
             print(f"Archivo: {path.name}")
             print(f"Caption: {strip_markup_for_ntfy(caption)}")
             if path.exists():
@@ -968,7 +1048,11 @@ class NotificationRouter:
     def channel_names(self) -> list[str]:
         return [str(getattr(client, "name", "desconocido")) for client in self.clients]
 
-    def send_message(self, message: str) -> None:
+    def send_message(
+        self,
+        message: str,
+        options: NotificationOptions | None = None,
+    ) -> None:
         if not self.clients:
             print("Notificaciones no configuradas: no hay canales disponibles.")
             print(message)
@@ -979,7 +1063,7 @@ class NotificationRouter:
         for client in self.clients:
             channel_name = str(getattr(client, "name", "desconocido"))
             try:
-                client.send_message(message)
+                client.send_message(message, options)
                 print(f"Notificacion enviada por {channel_name}.")
             except Exception as exc:
                 errors.append(f"{channel_name}: {exc}")
@@ -1203,13 +1287,19 @@ def fetch_telegram_updates(offset: int) -> list[dict[str, object]]:
     return [update for update in result if isinstance(update, dict)]
 
 
-def send_message(message: str) -> None:
-    build_notification_router().send_message(message)
+def send_message(
+    message: str,
+    options: NotificationOptions | None = None,
+) -> None:
+    build_notification_router().send_message(message, options)
 
 
-def try_send_message(message: str) -> None:
+def try_send_message(
+    message: str,
+    options: NotificationOptions | None = None,
+) -> None:
     try:
-        send_message(message)
+        send_message(message, options)
     except Exception as exc:
         print(f"No se pudo enviar la notificacion: {exc}", file=sys.stderr)
         print(
@@ -1684,7 +1774,7 @@ def process_url(
         f"⬅️ Antes:\n{before}\n\n"
         f"➡️ Despues:\n{after}"
     )
-    try_send_message(message)
+    try_send_message(message, NotificationOptions(open_url=url))
 
     return {
         "name": name,

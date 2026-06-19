@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -107,19 +108,56 @@ class NtfyClientTests(unittest.TestCase):
             session=session,
         )
 
-        client.send_message("<b>Cambio</b> &amp; aviso")
+        message_uuid = uuid.UUID("00000000-0000-0000-0000-000000000001")
+        with patch("monitor.uuid.uuid4", return_value=message_uuid):
+            client.send_message("<b>Cambio</b> &amp; aviso")
 
         self.assertEqual(len(session.posts), 1)
         post = session.posts[0]
+        sequence_id = "monitor-urls-00000000000000000000000000000001"
         self.assertEqual(post["url"], "https://ntfy.example/alerts")
         self.assertEqual(post["content"], "Cambio & aviso")
-        self.assertEqual(
-            post["headers"],
-            {
-                "Authorization": "Bearer secret-token",
-                "Priority": "high",
-                "Tags": "warning,house",
-            },
+        self.assertEqual(post["headers"]["Authorization"], "Bearer secret-token")
+        self.assertEqual(post["headers"]["Priority"], "high")
+        self.assertEqual(post["headers"]["Tags"], "warning,house")
+        self.assertEqual(post["headers"]["X-Sequence-ID"], sequence_id)
+        self.assertIn("action=http", post["headers"]["Actions"])
+        self.assertIn("label=Eliminar", post["headers"]["Actions"])
+        self.assertIn(
+            f"url=https://ntfy.example/alerts/{sequence_id}",
+            post["headers"]["Actions"],
+        )
+        self.assertIn("method=DELETE", post["headers"]["Actions"])
+        self.assertIn(
+            'headers.Authorization="Bearer secret-token"',
+            post["headers"]["Actions"],
+        )
+
+    def test_ntfy_send_message_adds_open_and_delete_actions(self) -> None:
+        session = FakeSession()
+        client = monitor.NtfyClient(
+            monitor.NtfySettings(topic="alerts", server="https://ntfy.example/"),
+            session=session,
+        )
+        message_uuid = uuid.UUID("00000000-0000-0000-0000-000000000002")
+
+        with patch("monitor.uuid.uuid4", return_value=message_uuid):
+            client.send_message(
+                "Cambio detectado",
+                monitor.NotificationOptions(open_url="https://example.com/casa"),
+            )
+
+        self.assertEqual(len(session.posts), 1)
+        sequence_id = "monitor-urls-00000000000000000000000000000002"
+        actions = session.posts[0]["headers"]["Actions"]
+        self.assertEqual(session.posts[0]["headers"]["X-Sequence-ID"], sequence_id)
+        self.assertIn("action=view", actions)
+        self.assertIn("label=Abrir web", actions)
+        self.assertIn("url=https://example.com/casa", actions)
+        self.assertIn("action=http", actions)
+        self.assertIn(
+            f"url=https://ntfy.example/alerts/{sequence_id}",
+            actions,
         )
 
     def test_ntfy_send_document_puts_file_without_network(self) -> None:
@@ -138,23 +176,53 @@ class NtfyClientTests(unittest.TestCase):
             path = Path(tmp_dir) / "reporte.txt"
             path.write_bytes(b"contenido privado")
 
-            client.send_document(path, "<b>Texto extraido</b> &amp; listo")
+            document_uuid = uuid.UUID("00000000-0000-0000-0000-000000000003")
+            with patch("monitor.uuid.uuid4", return_value=document_uuid):
+                client.send_document(path, "<b>Texto extraido</b> &amp; listo")
 
         self.assertEqual(len(session.puts), 1)
         put = session.puts[0]
+        sequence_id = "monitor-urls-00000000000000000000000000000003"
         self.assertEqual(put["url"], "https://ntfy.example/alerts")
         self.assertEqual(put["content"], b"contenido privado")
         self.assertEqual(put["auth"], None)
-        self.assertEqual(
-            put["headers"],
-            {
-                "Authorization": "Bearer secret-token",
-                "Priority": "high",
-                "Tags": "warning,house",
-                "Filename": "reporte.txt",
-                "Message": "Texto extraido & listo",
-                "Content-Type": "text/plain",
-            },
+        self.assertEqual(put["headers"]["Authorization"], "Bearer secret-token")
+        self.assertEqual(put["headers"]["Priority"], "high")
+        self.assertEqual(put["headers"]["Tags"], "warning,house")
+        self.assertEqual(put["headers"]["Filename"], "reporte.txt")
+        self.assertEqual(put["headers"]["Message"], "Texto extraido & listo")
+        self.assertEqual(put["headers"]["Content-Type"], "text/plain")
+        self.assertEqual(put["headers"]["X-Sequence-ID"], sequence_id)
+        self.assertIn("label=Eliminar", put["headers"]["Actions"])
+        self.assertIn(
+            f"url=https://ntfy.example/alerts/{sequence_id}",
+            put["headers"]["Actions"],
+        )
+        self.assertIn(
+            'headers.Authorization="Bearer secret-token"',
+            put["headers"]["Actions"],
+        )
+
+    def test_ntfy_delete_action_uses_basic_auth_for_username_password(self) -> None:
+        session = FakeSession()
+        client = monitor.NtfyClient(
+            monitor.NtfySettings(
+                topic="alerts",
+                server="https://ntfy.example/",
+                username="user",
+                password="pass",
+            ),
+            session=session,
+        )
+        message_uuid = uuid.UUID("00000000-0000-0000-0000-000000000004")
+
+        with patch("monitor.uuid.uuid4", return_value=message_uuid):
+            client.send_message("Mensaje")
+
+        self.assertEqual(len(session.posts), 1)
+        self.assertIn(
+            'headers.Authorization="Basic dXNlcjpwYXNz"',
+            session.posts[0]["headers"]["Actions"],
         )
 
     def test_ntfy_send_document_encodes_non_ascii_caption_header(self) -> None:
