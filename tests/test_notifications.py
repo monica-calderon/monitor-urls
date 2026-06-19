@@ -1,0 +1,137 @@
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import monitor
+
+
+def settings(
+    method: str,
+    telegram: bool = False,
+    ntfy: bool = False,
+) -> monitor.NotificationSettings:
+    return monitor.NotificationSettings(
+        method=method,
+        telegram=monitor.TelegramSettings(
+            bot_token="telegram-token" if telegram else "",
+            chat_id="telegram-chat" if telegram else "",
+        ),
+        ntfy=monitor.NtfySettings(
+            topic="topic" if ntfy else "",
+            server="https://ntfy.example",
+        ),
+    )
+
+
+class FakeResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.posts = []
+
+    def post(self, url: str, **kwargs: object) -> FakeResponse:
+        self.posts.append({"url": url, **kwargs})
+        return FakeResponse()
+
+
+class NotificationSelectionTests(unittest.TestCase):
+    def test_auto_uses_all_complete_channels(self) -> None:
+        selected = monitor.select_notification_channels(
+            settings("auto", telegram=True, ntfy=True)
+        )
+
+        self.assertEqual(selected, ["telegram", "ntfy"])
+
+    def test_auto_skips_incomplete_channels(self) -> None:
+        selected = monitor.select_notification_channels(
+            settings("auto", telegram=False, ntfy=True)
+        )
+
+        self.assertEqual(selected, ["ntfy"])
+
+    def test_telegram_method_uses_only_telegram(self) -> None:
+        selected = monitor.select_notification_channels(
+            settings("telegram", telegram=True, ntfy=True)
+        )
+
+        self.assertEqual(selected, ["telegram"])
+
+    def test_ntfy_method_uses_only_ntfy_and_requires_topic(self) -> None:
+        selected = monitor.select_notification_channels(
+            settings("ntfy", telegram=True, ntfy=True)
+        )
+
+        self.assertEqual(selected, ["ntfy"])
+        with self.assertRaisesRegex(RuntimeError, "NTFY_TOPIC"):
+            monitor.select_notification_channels(settings("ntfy", ntfy=False))
+
+    def test_both_method_requires_and_uses_both(self) -> None:
+        selected = monitor.select_notification_channels(
+            settings("both", telegram=True, ntfy=True)
+        )
+
+        self.assertEqual(selected, ["telegram", "ntfy"])
+        with self.assertRaisesRegex(RuntimeError, "requiere"):
+            monitor.select_notification_channels(settings("both", telegram=True))
+
+    def test_invalid_method_raises_clear_error(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "NTFY_METHOD"):
+            monitor.select_notification_channels(settings("bad", telegram=True))
+
+
+class NtfyClientTests(unittest.TestCase):
+    def test_ntfy_send_posts_plain_text_without_network(self) -> None:
+        session = FakeSession()
+        client = monitor.NtfyClient(
+            monitor.NtfySettings(
+                topic="alerts",
+                server="https://ntfy.example/",
+                token="secret-token",
+                priority="high",
+                tags="warning,house",
+            ),
+            session=session,
+        )
+
+        client.send_message("<b>Cambio</b> &amp; aviso")
+
+        self.assertEqual(len(session.posts), 1)
+        post = session.posts[0]
+        self.assertEqual(post["url"], "https://ntfy.example/alerts")
+        self.assertEqual(post["content"], "Cambio & aviso")
+        self.assertEqual(
+            post["headers"],
+            {
+                "Authorization": "Bearer secret-token",
+                "Priority": "high",
+                "Tags": "warning,house",
+            },
+        )
+
+
+class NotificationRouterTests(unittest.TestCase):
+    def test_router_sends_to_telegram_and_ntfy_when_both_configured(self) -> None:
+        session = FakeSession()
+        router = monitor.build_notification_router(
+            settings("both", telegram=True, ntfy=True),
+            ntfy_session=session,
+        )
+
+        with patch("monitor.send_telegram") as send_telegram:
+            router.send_message("mensaje")
+
+        send_telegram.assert_called_once()
+        self.assertEqual(len(session.posts), 1)
+        self.assertEqual(session.posts[0]["content"], "mensaje")
+
+
+if __name__ == "__main__":
+    unittest.main()

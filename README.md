@@ -1,6 +1,6 @@
-# Monitor de URLs con Telegram
+# Monitor de URLs con Telegram y Ntfy
 
-Este proyecto revisa paginas web privadas cada 15 minutos, avisa por Telegram si cambia el texto y envia un archivo `.txt` por cada pagina leida correctamente.
+Este proyecto revisa paginas web privadas cada 15 minutos, avisa por Telegram, Ntfy o ambos si cambia el texto y envia un archivo `.txt` por cada pagina leida correctamente cuando Telegram esta activo.
 
 Las URLs no estan escritas en el codigo ni en el README. Se guardan en GitHub Secrets para que el repositorio pueda seguir siendo publico sin mostrar las paginas monitorizadas.
 
@@ -12,7 +12,7 @@ Las URLs no estan escritas en el codigo ni en el README. Se guardan en GitHub Se
 4. Revisa si has enviado URLs nuevas al chat de Telegram.
 5. Si hay URLs nuevas, actualiza el secret `MONITOR_URLS_JSON` y las añade a la monitorizacion.
 6. Cada pagina se descarga primero por HTTP normal y, si hace falta, con Chromium mediante Playwright.
-7. Si una pagina cambia, el bot envia un resumen por Telegram.
+7. Si una pagina cambia, el bot envia un resumen por los canales configurados.
 8. En modo `debug`, si una pagina se lee correctamente, el bot envia un `.txt` individual con el texto extraido.
 9. En modo `normal`, el bot solo envia `.txt` si esa pagina ha cambiado.
 10. Si una pagina falla, el bot registra el error y continua con las demas.
@@ -39,6 +39,10 @@ Crea estos secrets:
 ```text
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
+NTFY_TOPIC
+NTFY_TOKEN
+NTFY_USERNAME
+NTFY_PASSWORD
 MONITOR_URLS_JSON
 GH_SECRETS_PAT
 MONITOR_STATE_JSON
@@ -47,6 +51,39 @@ MONITOR_STATE_JSON
 `TELEGRAM_BOT_TOKEN` es el token del bot de Telegram.
 
 `TELEGRAM_CHAT_ID` es el chat al que se enviaran los mensajes.
+
+## Notificaciones
+
+El bot puede enviar avisos por Telegram, Ntfy o ambos. Telegram sigue usandose para leer URLs nuevas desde el chat y para enviar documentos `.txt` o screenshots. Ntfy recibe los mensajes de texto en texto plano.
+
+Configura el modo con:
+
+```text
+NTFY_METHOD=auto|telegram|ntfy|both
+```
+
+- `auto`: usa todos los canales con credenciales completas.
+- `telegram`: envia solo por Telegram. Requiere `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`.
+- `ntfy`: envia solo por Ntfy. Requiere `NTFY_TOPIC`.
+- `both`: envia por Telegram y Ntfy. Requiere credenciales completas de ambos.
+
+Variables de Ntfy:
+
+```text
+NTFY_TOPIC
+NTFY_SERVER=https://ntfy.sh
+NTFY_TOKEN
+NTFY_USERNAME
+NTFY_PASSWORD
+NTFY_PRIORITY
+NTFY_TAGS
+```
+
+`NTFY_TOPIC` puede ser un topic simple, por ejemplo `mi-topic`, o una URL completa. Si es un topic simple, el bot publica en `NTFY_SERVER/NTFY_TOPIC`.
+
+`NTFY_TOKEN`, `NTFY_USERNAME` y `NTFY_PASSWORD` son opcionales. Usa token si tu servidor Ntfy lo requiere; si no hay token, el bot puede usar usuario y password.
+
+En GitHub Actions, usa repository variables para `NTFY_METHOD`, `NTFY_SERVER`, `NTFY_PRIORITY` y `NTFY_TAGS`, y secrets para `NTFY_TOPIC`, `NTFY_TOKEN`, `NTFY_USERNAME` y `NTFY_PASSWORD` si contienen datos privados.
 
 `MONITOR_URLS_JSON` contiene las paginas privadas a revisar. Formato:
 
@@ -251,7 +288,7 @@ Authorization: Bearer TU_GITHUB_TOKEN
 
 No guardes este token en el repositorio.
 
-## Que recibiras en Telegram
+## Que recibiras
 
 Por cada ejecucion real:
 
@@ -262,6 +299,8 @@ Por cada ejecucion real:
 - Si una web se lee correctamente en `debug`: archivo `.txt` con nombre identificativo.
 - Si una web cambia en `normal`: archivo `.txt` con nombre identificativo.
 - Si una web esta en `manual_summary`: en `normal`, solo queda registrado en logs; en el proximo `debug`, se reactiva y se monitoriza.
+
+Los mensajes de texto se envian por los canales activos segun `NTFY_METHOD`. Los documentos `.txt` y screenshots se envian por Telegram.
 
 Cada `.txt` incluye:
 

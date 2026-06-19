@@ -77,6 +77,14 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
+          NTFY_METHOD: ${{ vars.NTFY_METHOD }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC || vars.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ vars.NTFY_SERVER }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          NTFY_USERNAME: ${{ secrets.NTFY_USERNAME }}
+          NTFY_PASSWORD: ${{ secrets.NTFY_PASSWORD }}
+          NTFY_PRIORITY: ${{ vars.NTFY_PRIORITY }}
+          NTFY_TAGS: ${{ vars.NTFY_TAGS }}
           GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
           MONITOR_URLS_JSON: ${{ secrets.MONITOR_URLS_JSON }}
           MONITOR_STATE_JSON: ${{ secrets.MONITOR_STATE_JSON }}

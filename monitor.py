@@ -9,6 +9,7 @@ import atexit
 import difflib
 import base64
 import hashlib
+import html
 import json
 import os
 import re
@@ -33,6 +34,14 @@ STATE_DIR = Path(os.getenv("STATE_DIR", ".monitor_state"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_ALLOWED_USER_ID = os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip()
+NTFY_METHOD = os.getenv("NTFY_METHOD", "auto").strip().lower() or "auto"
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
+NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").strip() or "https://ntfy.sh"
+NTFY_TOKEN = os.getenv("NTFY_TOKEN", "").strip()
+NTFY_USERNAME = os.getenv("NTFY_USERNAME", "").strip()
+NTFY_PASSWORD = os.getenv("NTFY_PASSWORD", "").strip()
+NTFY_PRIORITY = os.getenv("NTFY_PRIORITY", "").strip()
+NTFY_TAGS = os.getenv("NTFY_TAGS", "").strip()
 GH_SECRETS_PAT = os.getenv("GH_SECRETS_PAT", "").strip()
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "monica-calderon/monitor-urls").strip()
 TELEGRAM_UPDATES_JSON = os.getenv("TELEGRAM_UPDATES_JSON", "").strip()
@@ -793,25 +802,241 @@ def split_message(message: str, limit: int = 3900) -> list[str]:
     return chunks
 
 
-def send_telegram(message: str) -> None:
+@dataclass(frozen=True)
+class TelegramSettings:
+    bot_token: str
+    chat_id: str
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.bot_token and self.chat_id)
+
+
+@dataclass(frozen=True)
+class NtfySettings:
+    topic: str
+    server: str = "https://ntfy.sh"
+    token: str = ""
+    username: str = ""
+    password: str = ""
+    priority: str = ""
+    tags: str = ""
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.topic)
+
+    @property
+    def publish_url(self) -> str:
+        if self.topic.startswith(("http://", "https://")):
+            return self.topic
+        return f"{self.server.rstrip('/')}/{self.topic.lstrip('/')}"
+
+
+@dataclass(frozen=True)
+class NotificationSettings:
+    method: str
+    telegram: TelegramSettings
+    ntfy: NtfySettings
+
+
+def strip_markup_for_ntfy(message: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", "", message)
+    return html.unescape(without_tags)
+
+
+class TelegramClient:
+    name = "telegram"
+
+    def __init__(self, settings: TelegramSettings) -> None:
+        self.settings = settings
+
+    def send_message(self, message: str) -> None:
+        send_telegram(message, self.settings)
+
+
+class NtfyClient:
+    name = "ntfy"
+
+    def __init__(self, settings: NtfySettings, session: object | None = None) -> None:
+        self.settings = settings
+        self.session = session
+
+    def send_message(self, message: str) -> None:
+        payload = strip_markup_for_ntfy(message)
+        headers: dict[str, str] = {}
+        auth: tuple[str, str] | None = None
+        if self.settings.token:
+            headers["Authorization"] = f"Bearer {self.settings.token}"
+        elif self.settings.username or self.settings.password:
+            auth = (self.settings.username, self.settings.password)
+        if self.settings.priority:
+            headers["Priority"] = self.settings.priority
+        if self.settings.tags:
+            headers["Tags"] = self.settings.tags
+
+        if DRY_RUN and self.session is None:
+            print("\n--- MENSAJE NTFY DRY_RUN ---")
+            print(f"URL: {self.settings.publish_url}")
+            print(payload)
+            print("--- FIN MENSAJE ---\n")
+            return
+
+        if self.session is not None:
+            response = self.session.post(
+                self.settings.publish_url,
+                content=payload,
+                headers=headers,
+                auth=auth,
+            )
+            response.raise_for_status()
+            return
+
+        with httpx.Client(timeout=30) as client:
+            response = client.post(
+                self.settings.publish_url,
+                content=payload,
+                headers=headers,
+                auth=auth,
+            )
+            response.raise_for_status()
+
+
+class NotificationRouter:
+    def __init__(self, clients: list[object]) -> None:
+        self.clients = clients
+
+    @property
+    def channel_names(self) -> list[str]:
+        return [str(getattr(client, "name", "desconocido")) for client in self.clients]
+
+    def send_message(self, message: str) -> None:
+        if not self.clients:
+            print("Notificaciones no configuradas: no hay canales disponibles.")
+            print(message)
+            return
+
+        print(f"Enviando notificacion por: {', '.join(self.channel_names)}")
+        errors: list[str] = []
+        for client in self.clients:
+            channel_name = str(getattr(client, "name", "desconocido"))
+            try:
+                client.send_message(message)
+                print(f"Notificacion enviada por {channel_name}.")
+            except Exception as exc:
+                errors.append(f"{channel_name}: {exc}")
+                print(
+                    f"No se pudo enviar la notificacion por {channel_name}: {exc}",
+                    file=sys.stderr,
+                )
+                if channel_name == "ntfy":
+                    print("Error claro de Ntfy: fallo el envio HTTP POST.", file=sys.stderr)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+
+def build_notification_settings() -> NotificationSettings:
+    return NotificationSettings(
+        method=NTFY_METHOD,
+        telegram=TelegramSettings(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID),
+        ntfy=NtfySettings(
+            topic=NTFY_TOPIC,
+            server=NTFY_SERVER,
+            token=NTFY_TOKEN,
+            username=NTFY_USERNAME,
+            password=NTFY_PASSWORD,
+            priority=NTFY_PRIORITY,
+            tags=NTFY_TAGS,
+        ),
+    )
+
+
+def select_notification_channels(settings: NotificationSettings) -> list[str]:
+    if settings.method not in {"auto", "telegram", "ntfy", "both"}:
+        raise RuntimeError("NTFY_METHOD debe ser auto, telegram, ntfy o both.")
+
+    telegram_ready = settings.telegram.is_configured
+    ntfy_ready = settings.ntfy.is_configured
+
+    if settings.method == "auto":
+        channels = []
+        if telegram_ready:
+            channels.append("telegram")
+        if ntfy_ready:
+            channels.append("ntfy")
+        return channels
+
+    if settings.method == "telegram":
+        if not telegram_ready:
+            raise RuntimeError("NTFY_METHOD=telegram requiere TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID.")
+        return ["telegram"]
+
+    if settings.method == "ntfy":
+        if not ntfy_ready:
+            raise RuntimeError("NTFY_METHOD=ntfy requiere NTFY_TOPIC.")
+        return ["ntfy"]
+
+    if not telegram_ready or not ntfy_ready:
+        raise RuntimeError(
+            "NTFY_METHOD=both requiere TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID y NTFY_TOPIC."
+        )
+    return ["telegram", "ntfy"]
+
+
+def build_notification_router(
+    settings: NotificationSettings | None = None,
+    ntfy_session: object | None = None,
+) -> NotificationRouter:
+    settings = settings or build_notification_settings()
+    channels = select_notification_channels(settings)
+    clients: list[object] = []
+    for channel in channels:
+        if channel == "telegram":
+            clients.append(TelegramClient(settings.telegram))
+        elif channel == "ntfy":
+            clients.append(NtfyClient(settings.ntfy, session=ntfy_session))
+    return NotificationRouter(clients)
+
+
+def log_notification_configuration(settings: NotificationSettings | None = None) -> None:
+    settings = settings or build_notification_settings()
+    channels = select_notification_channels(settings)
+    configured = []
+    if settings.telegram.is_configured:
+        configured.append("telegram")
+    if settings.ntfy.is_configured:
+        configured.append("ntfy")
+    print(
+        "Canales configurados: "
+        f"{', '.join(configured) if configured else 'ninguno'}; "
+        "canales activos: "
+        f"{', '.join(channels) if channels else 'ninguno'}."
+    )
+
+
+def send_telegram(
+    message: str,
+    settings: TelegramSettings | None = None,
+) -> None:
+    settings = settings or TelegramSettings(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
     if DRY_RUN:
         print("\n--- MENSAJE TELEGRAM DRY_RUN ---")
         print(message)
         print("--- FIN MENSAJE ---\n")
         return
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not settings.bot_token or not settings.chat_id:
         print("Telegram no configurado: faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
         print(message)
         return
 
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    api_url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
     with httpx.Client(timeout=30) as client:
         for chunk in split_message(message):
             response = client.post(
                 api_url,
                 json={
-                    "chat_id": TELEGRAM_CHAT_ID,
+                    "chat_id": settings.chat_id,
                     "text": chunk,
                     "disable_web_page_preview": True,
                 },
@@ -888,11 +1113,15 @@ def fetch_telegram_updates(offset: int) -> list[dict[str, object]]:
     return [update for update in result if isinstance(update, dict)]
 
 
-def try_send_telegram(message: str) -> None:
+def send_message(message: str) -> None:
+    build_notification_router().send_message(message)
+
+
+def try_send_message(message: str) -> None:
     try:
-        send_telegram(message)
+        send_message(message)
     except Exception as exc:
-        print(f"No se pudo enviar el mensaje de Telegram: {exc}", file=sys.stderr)
+        print(f"No se pudo enviar la notificacion: {exc}", file=sys.stderr)
         print(
             "El mensaje no se muestra en logs para no publicar URLs privadas.",
             file=sys.stderr,
@@ -1031,7 +1260,7 @@ def add_urls_from_telegram_messages(
             continue
 
         if url in existing_urls:
-            try_send_telegram(
+            try_send_message(
                 f"ℹ️ URL ya existia\n\n🔗 URL: {url}\n\nNo se ha añadido de nuevo."
             )
             max_processed_update_id = max(max_processed_update_id, update_id)
@@ -1061,7 +1290,7 @@ def add_urls_from_telegram_messages(
     except Exception as exc:
         detail = clean_error_detail(exc)
         for url in urls_to_add:
-            try_send_telegram(
+            try_send_message(
                 f"⚠️ No se pudo añadir la URL\n\n🔗 URL: {url}\n\n🧾 Detalle: {detail}"
             )
         print(
@@ -1072,7 +1301,7 @@ def add_urls_from_telegram_messages(
         return configs
 
     for url in urls_to_add:
-        try_send_telegram(
+        try_send_message(
             f"✅ URL añadida\n\n"
             f"🏷️ Nombre: {build_auto_name_from_url(url)}\n"
             f"🔗 URL: {url}\n\n"
@@ -1163,7 +1392,7 @@ def send_debug_summary(
         if items
         else f"🧪 Resumen debug\n\n🕒 Fecha Madrid: {checked_at.isoformat()}\n📌 No se reviso ninguna URL."
     )
-    try_send_telegram(message)
+    try_send_message(message)
 
 
 def reactivate_manual_urls_for_debug(
@@ -1293,7 +1522,7 @@ def handle_manual_summary(
     print(f"Revision manual necesaria: {name}")
     print("URL: oculta en logs publicos")
     if notify_telegram:
-        try_send_telegram(message)
+        try_send_message(message)
 
     return {
         "name": name,
@@ -1361,7 +1590,7 @@ def process_url(
         f"⬅️ Antes:\n{before}\n\n"
         f"➡️ Despues:\n{after}"
     )
-    try_send_telegram(message)
+    try_send_message(message)
 
     return {
         "name": name,
@@ -1381,6 +1610,7 @@ def main() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     action_to_run = validate_action_to_run()
     debug_mode = is_debug_mode(action_to_run)
+    log_notification_configuration()
     now_utc = datetime.now(timezone.utc)
     now_madrid = now_utc.astimezone(MADRID_TIMEZONE)
 
@@ -1394,7 +1624,7 @@ def main() -> int:
             file=sys.stderr,
         )
         if debug_mode:
-            try_send_telegram(
+            try_send_message(
                 "⚠️ No se pudieron revisar los mensajes de Telegram\n\n"
                 f"🧾 Detalle: {detail}"
             )
@@ -1404,7 +1634,7 @@ def main() -> int:
         if reactivated_names:
             try:
                 update_monitor_urls_secret(url_configs)
-                try_send_telegram(
+                try_send_message(
                     "🔄 URLs reactivadas en debug\n\n"
                     f"{format_name_list(reactivated_names)}\n\n"
                     "Se monitorizaran en esta ejecucion."
@@ -1415,7 +1645,7 @@ def main() -> int:
                     "No se pudo persistir la reactivacion de URLs manuales.",
                     file=sys.stderr,
                 )
-                try_send_telegram(
+                try_send_message(
                     "⚠️ No se pudo guardar la reactivacion de URLs manuales\n\n"
                     f"{format_name_list(reactivated_names)}\n\n"
                     f"🧾 Detalle: {detail}\n\n"
@@ -1546,7 +1776,7 @@ def main() -> int:
                         }
                     )
                 elif is_error_reminder_window(now_madrid):
-                    try_send_telegram(
+                    try_send_message(
                         "⏰ Recordatorio de error de monitorizacion\n\n"
                         + telegram_error_message
                     )
@@ -1562,7 +1792,7 @@ def main() -> int:
         if manual_names:
             try:
                 update_monitor_urls_secret(updated_url_configs)
-                try_send_telegram(
+                try_send_message(
                     "👀 URLs pasadas a modo manual\n\n"
                     f"{format_name_list(manual_names)}\n\n"
                     "No se volveran a monitorizar automaticamente hasta el proximo debug."
@@ -1573,7 +1803,7 @@ def main() -> int:
                     "No se pudo pasar a modo manual las URLs con error.",
                     file=sys.stderr,
                 )
-                try_send_telegram(
+                try_send_message(
                     "⚠️ No se pudo guardar el modo manual de URLs con error\n\n"
                     f"{format_name_list(manual_names)}\n\n"
                     f"🧾 Detalle: {detail}\n\n"
@@ -1590,7 +1820,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             if debug_mode:
-                try_send_telegram(
+                try_send_message(
                     "⚠️ No se pudo actualizar el estado privado de monitorizacion\n\n"
                     f"🧾 Detalle: {clean_error_detail(exc)}"
                 )
