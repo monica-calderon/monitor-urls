@@ -57,6 +57,8 @@ TELEGRAM_OFFSET_PATH = STATE_DIR / "telegram_update_offset.txt"
 URL_PATTERN = re.compile(r"https?://[^\s<>()\"']+", re.IGNORECASE)
 URLS_SECRET_NAME = "MONITOR_URLS_JSON"
 STATE_SECRET_NAME = "MONITOR_STATE_JSON"
+DELETE_URL_CALLBACK_PREFIX = "delete-url:"
+DELETE_URL_CALLBACK_HASH_LENGTH = 16
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -198,13 +200,17 @@ def load_url_configs() -> list[dict[str, object]]:
 
 
 def validate_action_to_run() -> str:
-    if ACTION_TO_RUN not in {"normal", "debug"}:
-        raise RuntimeError("ACTION_TO_RUN debe ser normal o debug.")
+    if ACTION_TO_RUN not in {"normal", "debug", "delete-url"}:
+        raise RuntimeError("ACTION_TO_RUN debe ser normal, debug o delete-url.")
     return ACTION_TO_RUN
 
 
 def is_debug_mode(action_to_run: str) -> bool:
     return action_to_run == "debug"
+
+
+def is_delete_url_mode(action_to_run: str) -> bool:
+    return action_to_run == "delete-url"
 
 
 def is_monitoring_window(now_madrid: datetime) -> bool:
@@ -229,6 +235,13 @@ def build_auto_name_from_url(url: str) -> str:
 
 def normalize_url(value: str) -> str:
     return value.strip().rstrip(".,;:!?)\"]}")
+
+
+def delete_url_callback_token(url: str) -> str:
+    normalized = normalize_url(url)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[
+        :DELETE_URL_CALLBACK_HASH_LENGTH
+    ]
 
 
 def extract_first_url(text: str) -> str | None:
@@ -1213,6 +1226,70 @@ def send_telegram(
             response.raise_for_status()
 
 
+def telegram_delete_button_label(config: dict[str, object]) -> str:
+    name = str(config.get("name", "")).strip() or "URL sin nombre"
+    mode = str(config.get("mode", "auto"))
+    suffix = "manual" if mode == "manual_summary" else "auto"
+    label = f"{name} ({suffix})"
+    if len(label) <= 64:
+        return label
+    return f"{label[:61]}..."
+
+
+def build_delete_url_reply_markup(
+    configs: list[dict[str, object]],
+) -> dict[str, list[list[dict[str, str]]]]:
+    keyboard = []
+    for config in configs:
+        url = str(config["url"])
+        keyboard.append(
+            [
+                {
+                    "text": telegram_delete_button_label(config),
+                    "callback_data": (
+                        DELETE_URL_CALLBACK_PREFIX + delete_url_callback_token(url)
+                    ),
+                }
+            ]
+        )
+    return {"inline_keyboard": keyboard}
+
+
+def send_delete_url_selector(
+    configs: list[dict[str, object]],
+    settings: TelegramSettings | None = None,
+) -> None:
+    settings = settings or TelegramSettings(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+    reply_markup = build_delete_url_reply_markup(configs)
+    message = (
+        "🗑️ Elige la URL que quieres eliminar\n\n"
+        "Toca una opcion. Se borrara de MONITOR_URLS_JSON en la proxima ejecucion."
+    )
+
+    if DRY_RUN:
+        print("\n--- SELECTOR TELEGRAM DRY_RUN ---")
+        print(message)
+        print(json.dumps(reply_markup, ensure_ascii=False, indent=2))
+        print("--- FIN SELECTOR ---\n")
+        return
+
+    if not settings.bot_token or not settings.chat_id:
+        raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
+
+    api_url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
+    with httpx.Client(timeout=30) as client:
+        response = client.post(
+            api_url,
+            json={
+                "chat_id": settings.chat_id,
+                "text": message,
+                "disable_web_page_preview": True,
+                "reply_markup": reply_markup,
+            },
+        )
+        response.raise_for_status()
+
+
 def send_telegram_document(
     path: Path,
     caption: str,
@@ -1268,7 +1345,7 @@ def fetch_telegram_updates(offset: int) -> list[dict[str, object]]:
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     params: dict[str, object] = {
         "timeout": 0,
-        "allowed_updates": json.dumps(["message"]),
+        "allowed_updates": json.dumps(["message", "callback_query"]),
     }
     if offset:
         params["offset"] = offset + 1
@@ -1406,7 +1483,35 @@ def is_allowed_telegram_user(message: dict[str, object]) -> bool:
     return bool(allowed_id) and str(sender_id) == allowed_id
 
 
+def extract_delete_url_callback_token(
+    callback_query: dict[str, object],
+) -> str | None:
+    data = callback_query.get("data")
+    if not isinstance(data, str) or not data.startswith(DELETE_URL_CALLBACK_PREFIX):
+        return None
+    token = data.removeprefix(DELETE_URL_CALLBACK_PREFIX).strip()
+    if not re.fullmatch(r"[0-9a-f]{16}", token):
+        return None
+    return token
+
+
+def find_delete_url_config_index(
+    configs: list[dict[str, object]],
+    token: str,
+) -> int | None:
+    for index, config in enumerate(configs):
+        if delete_url_callback_token(str(config["url"])) == token:
+            return index
+    return None
+
+
 def add_urls_from_telegram_messages(
+    configs: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    return process_telegram_updates(configs)
+
+
+def add_urls_from_telegram_messages_legacy(
     configs: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     offset = load_telegram_offset()
@@ -1490,6 +1595,140 @@ def add_urls_from_telegram_messages(
             f"🏷️ Nombre: {build_auto_name_from_url(url)}\n"
             f"🔗 URL: {url}\n\n"
             "Se monitorizara en modo auto."
+        )
+
+    save_telegram_offset(max_processed_update_id)
+    return new_configs
+
+
+def process_telegram_updates(
+    configs: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    offset = load_telegram_offset()
+    updates = fetch_telegram_updates(offset)
+    if not updates:
+        return configs
+
+    new_configs = list(configs)
+    existing_urls = {normalize_url(str(config["url"])) for config in new_configs}
+    added_urls: list[str] = []
+    deleted_configs: list[dict[str, object]] = []
+    missing_delete_tokens: list[str] = []
+    max_processed_update_id = offset
+
+    for update in updates:
+        update_id = update.get("update_id")
+        if not isinstance(update_id, int) or update_id <= offset:
+            continue
+
+        message = update.get("message")
+        callback_query = update.get("callback_query")
+
+        if isinstance(callback_query, dict):
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            if not is_allowed_telegram_user(callback_query):
+                continue
+
+            token = extract_delete_url_callback_token(callback_query)
+            if not token:
+                continue
+
+            config_index = find_delete_url_config_index(new_configs, token)
+            if config_index is None:
+                missing_delete_tokens.append(token)
+                continue
+
+            deleted_config = new_configs.pop(config_index)
+            existing_urls.discard(normalize_url(str(deleted_config["url"])))
+            deleted_configs.append(deleted_config)
+            continue
+
+        if not isinstance(message, dict):
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        text = message.get("text")
+        if not isinstance(text, str):
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        if not is_allowed_telegram_user(message):
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        url = extract_first_url(text)
+        if not url:
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        if url in existing_urls:
+            try_send_message(
+                f"ℹ️ URL ya existia\n\n🔗 URL: {url}\n\nNo se ha añadido de nuevo."
+            )
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        new_configs.append(
+            {
+                "name": build_auto_name_from_url(url),
+                "url": url,
+                "mode": "auto",
+            }
+        )
+        existing_urls.add(url)
+        added_urls.append(url)
+        max_processed_update_id = max(max_processed_update_id, update_id)
+
+    has_secret_changes = bool(added_urls or deleted_configs)
+    if not has_secret_changes:
+        for token in missing_delete_tokens:
+            try_send_message(
+                "ℹ️ URL no encontrada\n\n"
+                f"El selector ya no coincide con MONITOR_URLS_JSON ({token})."
+            )
+        save_telegram_offset(max_processed_update_id)
+        return configs
+
+    try:
+        update_monitor_urls_secret(new_configs)
+    except Exception as exc:
+        detail = clean_error_detail(exc)
+        for url in added_urls:
+            try_send_message(
+                f"⚠️ No se pudo añadir la URL\n\n🔗 URL: {url}\n\n🧾 Detalle: {detail}"
+            )
+        for config in deleted_configs:
+            try_send_message(
+                "⚠️ No se pudo eliminar la URL\n\n"
+                f"🏷️ Nombre: {config['name']}\n"
+                f"🔗 URL: {config['url']}\n\n"
+                f"🧾 Detalle: {detail}"
+            )
+        print(
+            "No se pudo actualizar MONITOR_URLS_JSON. "
+            "No se avanza el offset de Telegram para poder reintentar.",
+            file=sys.stderr,
+        )
+        return configs
+
+    for url in added_urls:
+        try_send_message(
+            f"✅ URL añadida\n\n"
+            f"🏷️ Nombre: {build_auto_name_from_url(url)}\n"
+            f"🔗 URL: {url}\n\n"
+            "Se monitorizara en modo auto."
+        )
+    for config in deleted_configs:
+        try_send_message(
+            "✅ URL eliminada\n\n"
+            f"🏷️ Nombre: {config['name']}\n"
+            f"🔗 URL: {config['url']}\n\n"
+            "Se ha actualizado MONITOR_URLS_JSON."
+        )
+    for token in missing_delete_tokens:
+        try_send_message(
+            "ℹ️ URL no encontrada\n\n"
+            f"El selector ya no coincide con MONITOR_URLS_JSON ({token})."
         )
 
     save_telegram_offset(max_processed_update_id)
@@ -1794,13 +2033,19 @@ def main() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     action_to_run = validate_action_to_run()
     debug_mode = is_debug_mode(action_to_run)
+    delete_url_mode = is_delete_url_mode(action_to_run)
     log_notification_configuration()
     now_utc = datetime.now(timezone.utc)
     now_madrid = now_utc.astimezone(MADRID_TIMEZONE)
 
     url_configs = load_url_configs()
+    if delete_url_mode:
+        send_delete_url_selector(url_configs)
+        print("Selector delete-url enviado. No se ejecuta monitorizacion.")
+        return 0
+
     try:
-        url_configs = add_urls_from_telegram_messages(url_configs)
+        url_configs = process_telegram_updates(url_configs)
     except Exception as exc:
         detail = clean_error_detail(exc)
         print(

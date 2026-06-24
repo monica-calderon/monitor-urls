@@ -11,6 +11,7 @@ on:
         options:
           - normal
           - debug
+          - delete-url
   repository_dispatch:
     types:
       - monitor-urls

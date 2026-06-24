@@ -49,6 +49,163 @@ class FakeSession:
         return FakeResponse()
 
 
+def sample_configs() -> list[dict[str, object]]:
+    return [
+        {
+            "name": "Auto",
+            "url": "https://example.com/auto",
+            "mode": "auto",
+        },
+        {
+            "name": "Manual",
+            "url": "https://example.com/manual",
+            "mode": "manual_summary",
+        },
+    ]
+
+
+class TelegramDeleteUrlTests(unittest.TestCase):
+    def test_validate_action_to_run_accepts_delete_url(self) -> None:
+        with patch("monitor.ACTION_TO_RUN", "delete-url"):
+            self.assertEqual(monitor.validate_action_to_run(), "delete-url")
+
+    def test_delete_selector_includes_auto_and_manual_urls(self) -> None:
+        reply_markup = monitor.build_delete_url_reply_markup(sample_configs())
+
+        keyboard = reply_markup["inline_keyboard"]
+        self.assertEqual(len(keyboard), 2)
+        self.assertEqual(keyboard[0][0]["text"], "Auto (auto)")
+        self.assertEqual(keyboard[1][0]["text"], "Manual (manual)")
+        self.assertEqual(
+            keyboard[0][0]["callback_data"],
+            "delete-url:" + monitor.delete_url_callback_token("https://example.com/auto"),
+        )
+        self.assertEqual(
+            keyboard[1][0]["callback_data"],
+            "delete-url:"
+            + monitor.delete_url_callback_token("https://example.com/manual"),
+        )
+
+    def test_allowed_callback_deletes_matching_url(self) -> None:
+        configs = sample_configs()
+        token = monitor.delete_url_callback_token("https://example.com/manual")
+        updates = [
+            {
+                "update_id": 1,
+                "callback_query": {
+                    "from": {"id": 12345},
+                    "data": f"delete-url:{token}",
+                },
+            }
+        ]
+
+        with (
+            patch("monitor.TELEGRAM_ALLOWED_USER_ID", "12345"),
+            patch("monitor.TELEGRAM_CHAT_ID", "999"),
+            patch("monitor.load_telegram_offset", return_value=0),
+            patch("monitor.fetch_telegram_updates", return_value=updates),
+            patch("monitor.update_monitor_urls_secret") as update_secret,
+            patch("monitor.save_telegram_offset") as save_offset,
+            patch("monitor.try_send_message") as send_message,
+        ):
+            result = monitor.process_telegram_updates(configs)
+
+        self.assertEqual([config["name"] for config in result], ["Auto"])
+        update_secret.assert_called_once()
+        self.assertEqual(update_secret.call_args.args[0], result)
+        save_offset.assert_called_once_with(1)
+        self.assertIn("URL eliminada", send_message.call_args.args[0])
+
+    def test_callback_from_unauthorized_user_does_not_delete(self) -> None:
+        configs = sample_configs()
+        token = monitor.delete_url_callback_token("https://example.com/manual")
+        updates = [
+            {
+                "update_id": 1,
+                "callback_query": {
+                    "from": {"id": 54321},
+                    "data": f"delete-url:{token}",
+                },
+            }
+        ]
+
+        with (
+            patch("monitor.TELEGRAM_ALLOWED_USER_ID", "12345"),
+            patch("monitor.load_telegram_offset", return_value=0),
+            patch("monitor.fetch_telegram_updates", return_value=updates),
+            patch("monitor.update_monitor_urls_secret") as update_secret,
+            patch("monitor.save_telegram_offset") as save_offset,
+            patch("monitor.try_send_message") as send_message,
+        ):
+            result = monitor.process_telegram_updates(configs)
+
+        self.assertEqual(result, configs)
+        update_secret.assert_not_called()
+        send_message.assert_not_called()
+        save_offset.assert_called_once_with(1)
+
+    def test_unknown_callback_hash_does_not_update_secret(self) -> None:
+        configs = sample_configs()
+        updates = [
+            {
+                "update_id": 1,
+                "callback_query": {
+                    "from": {"id": 12345},
+                    "data": "delete-url:0000000000000000",
+                },
+            }
+        ]
+
+        with (
+            patch("monitor.TELEGRAM_ALLOWED_USER_ID", "12345"),
+            patch("monitor.load_telegram_offset", return_value=0),
+            patch("monitor.fetch_telegram_updates", return_value=updates),
+            patch("monitor.update_monitor_urls_secret") as update_secret,
+            patch("monitor.save_telegram_offset") as save_offset,
+            patch("monitor.try_send_message") as send_message,
+        ):
+            result = monitor.process_telegram_updates(configs)
+
+        self.assertEqual(result, configs)
+        update_secret.assert_not_called()
+        save_offset.assert_called_once_with(1)
+        self.assertIn("URL no encontrada", send_message.call_args.args[0])
+
+    def test_callback_update_does_not_block_add_url_message(self) -> None:
+        configs = sample_configs()
+        updates = [
+            {
+                "update_id": 1,
+                "callback_query": {
+                    "from": {"id": 12345},
+                    "data": "delete-url:0000000000000000",
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "from": {"id": 12345},
+                    "text": "https://new.example/path",
+                },
+            },
+        ]
+
+        with (
+            patch("monitor.TELEGRAM_ALLOWED_USER_ID", "12345"),
+            patch("monitor.load_telegram_offset", return_value=0),
+            patch("monitor.fetch_telegram_updates", return_value=updates),
+            patch("monitor.update_monitor_urls_secret") as update_secret,
+            patch("monitor.save_telegram_offset") as save_offset,
+            patch("monitor.try_send_message"),
+        ):
+            result = monitor.process_telegram_updates(configs)
+
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[-1]["url"], "https://new.example/path")
+        update_secret.assert_called_once()
+        save_offset.assert_called_once_with(2)
+
+
 class NotificationSelectionTests(unittest.TestCase):
     def test_auto_uses_all_complete_channels(self) -> None:
         selected = monitor.select_notification_channels(
