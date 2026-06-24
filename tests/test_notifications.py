@@ -2,8 +2,11 @@ import sys
 import tempfile
 import unittest
 import uuid
+import json
 from pathlib import Path
 from unittest.mock import patch
+
+import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -65,6 +68,42 @@ def sample_configs() -> list[dict[str, object]]:
 
 
 class TelegramDeleteUrlTests(unittest.TestCase):
+    def test_load_url_configs_rejects_duplicate_urls(self) -> None:
+        configs = [
+            {"name": "Uno", "url": "https://example.com/item", "mode": "auto"},
+            {"name": "Dos", "url": "https://example.com/item", "mode": "auto"},
+        ]
+
+        with patch.dict("os.environ", {"MONITOR_URLS_JSON": json.dumps(configs)}):
+            with self.assertRaisesRegex(RuntimeError, "URLs duplicadas"):
+                monitor.load_url_configs()
+
+    def test_load_url_configs_rejects_normalized_duplicate_urls(self) -> None:
+        configs = [
+            {"name": "Uno", "url": "https://example.com/item", "mode": "auto"},
+            {"name": "Dos", "url": "https://example.com/item,", "mode": "auto"},
+        ]
+
+        with patch.dict("os.environ", {"MONITOR_URLS_JSON": json.dumps(configs)}):
+            with self.assertRaisesRegex(RuntimeError, "URL #2 ya existe"):
+                monitor.load_url_configs()
+
+    def test_github_secret_unauthorized_error_mentions_pat(self) -> None:
+        request = httpx.Request("GET", "https://api.github.com/repos/o/r/actions/secrets/public-key")
+        response = httpx.Response(401, request=request)
+        error = httpx.HTTPStatusError("unauthorized", request=request, response=response)
+
+        with self.assertRaisesRegex(RuntimeError, "GH_SECRETS_PAT"):
+            monitor.raise_github_secret_update_error(error, "MONITOR_URLS_JSON")
+
+    def test_github_secret_forbidden_error_mentions_permissions(self) -> None:
+        request = httpx.Request("GET", "https://api.github.com/repos/o/r/actions/secrets/public-key")
+        response = httpx.Response(403, request=request)
+        error = httpx.HTTPStatusError("forbidden", request=request, response=response)
+
+        with self.assertRaisesRegex(RuntimeError, "Secrets: Read and write"):
+            monitor.raise_github_secret_update_error(error, "MONITOR_URLS_JSON")
+
     def test_validate_action_to_run_accepts_delete_url(self) -> None:
         with patch("monitor.ACTION_TO_RUN", "delete-url"):
             self.assertEqual(monitor.validate_action_to_run(), "delete-url")
@@ -93,6 +132,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
             {
                 "update_id": 1,
                 "callback_query": {
+                    "id": "callback-1",
                     "from": {"id": 12345},
                     "data": f"delete-url:{token}",
                 },
@@ -107,6 +147,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
             patch("monitor.update_monitor_urls_secret") as update_secret,
             patch("monitor.save_telegram_offset") as save_offset,
             patch("monitor.try_send_message") as send_message,
+            patch("monitor.try_answer_telegram_callback_query") as answer_callback,
         ):
             result = monitor.process_telegram_updates(configs)
 
@@ -115,6 +156,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
         self.assertEqual(update_secret.call_args.args[0], result)
         save_offset.assert_called_once_with(1)
         self.assertIn("URL eliminada", send_message.call_args.args[0])
+        answer_callback.assert_called_once_with("callback-1", "URL eliminada.")
 
     def test_callback_from_unauthorized_user_does_not_delete(self) -> None:
         configs = sample_configs()
@@ -123,6 +165,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
             {
                 "update_id": 1,
                 "callback_query": {
+                    "id": "callback-2",
                     "from": {"id": 54321},
                     "data": f"delete-url:{token}",
                 },
@@ -136,6 +179,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
             patch("monitor.update_monitor_urls_secret") as update_secret,
             patch("monitor.save_telegram_offset") as save_offset,
             patch("monitor.try_send_message") as send_message,
+            patch("monitor.try_answer_telegram_callback_query") as answer_callback,
         ):
             result = monitor.process_telegram_updates(configs)
 
@@ -143,6 +187,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
         update_secret.assert_not_called()
         send_message.assert_not_called()
         save_offset.assert_called_once_with(1)
+        answer_callback.assert_called_once_with("callback-2", "No autorizado.")
 
     def test_unknown_callback_hash_does_not_update_secret(self) -> None:
         configs = sample_configs()
@@ -150,6 +195,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
             {
                 "update_id": 1,
                 "callback_query": {
+                    "id": "callback-3",
                     "from": {"id": 12345},
                     "data": "delete-url:0000000000000000",
                 },
@@ -163,6 +209,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
             patch("monitor.update_monitor_urls_secret") as update_secret,
             patch("monitor.save_telegram_offset") as save_offset,
             patch("monitor.try_send_message") as send_message,
+            patch("monitor.try_answer_telegram_callback_query") as answer_callback,
         ):
             result = monitor.process_telegram_updates(configs)
 
@@ -170,6 +217,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
         update_secret.assert_not_called()
         save_offset.assert_called_once_with(1)
         self.assertIn("URL no encontrada", send_message.call_args.args[0])
+        answer_callback.assert_called_once_with("callback-3", "La URL ya no existe.")
 
     def test_callback_update_does_not_block_add_url_message(self) -> None:
         configs = sample_configs()
@@ -177,6 +225,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
             {
                 "update_id": 1,
                 "callback_query": {
+                    "id": "callback-4",
                     "from": {"id": 12345},
                     "data": "delete-url:0000000000000000",
                 },
@@ -197,6 +246,7 @@ class TelegramDeleteUrlTests(unittest.TestCase):
             patch("monitor.update_monitor_urls_secret") as update_secret,
             patch("monitor.save_telegram_offset") as save_offset,
             patch("monitor.try_send_message"),
+            patch("monitor.try_answer_telegram_callback_query"),
         ):
             result = monitor.process_telegram_updates(configs)
 
@@ -204,6 +254,33 @@ class TelegramDeleteUrlTests(unittest.TestCase):
         self.assertEqual(result[-1]["url"], "https://new.example/path")
         update_secret.assert_called_once()
         save_offset.assert_called_once_with(2)
+
+    def test_deleteurl_command_sends_selector_without_updating_secret(self) -> None:
+        configs = sample_configs()
+        updates = [
+            {
+                "update_id": 1,
+                "message": {
+                    "from": {"id": 12345},
+                    "text": "/deleteurl",
+                },
+            }
+        ]
+
+        with (
+            patch("monitor.TELEGRAM_ALLOWED_USER_ID", "12345"),
+            patch("monitor.load_telegram_offset", return_value=0),
+            patch("monitor.fetch_telegram_updates", return_value=updates),
+            patch("monitor.send_delete_url_selector") as send_selector,
+            patch("monitor.update_monitor_urls_secret") as update_secret,
+            patch("monitor.save_telegram_offset") as save_offset,
+        ):
+            result = monitor.process_telegram_updates(configs)
+
+        self.assertEqual(result, configs)
+        send_selector.assert_called_once_with(configs)
+        update_secret.assert_not_called()
+        save_offset.assert_called_once_with(1)
 
 
 class NotificationSelectionTests(unittest.TestCase):

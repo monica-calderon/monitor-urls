@@ -59,6 +59,7 @@ URLS_SECRET_NAME = "MONITOR_URLS_JSON"
 STATE_SECRET_NAME = "MONITOR_STATE_JSON"
 DELETE_URL_CALLBACK_PREFIX = "delete-url:"
 DELETE_URL_CALLBACK_HASH_LENGTH = 16
+DELETE_URL_COMMAND = "/deleteurl"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -183,6 +184,7 @@ def load_url_configs() -> list[dict[str, object]]:
     if not isinstance(configs, list) or not configs:
         raise RuntimeError("MONITOR_URLS_JSON debe ser una lista con al menos una URL.")
 
+    seen_urls: dict[str, int] = {}
     for index, config in enumerate(configs, start=1):
         if not isinstance(config, dict):
             raise RuntimeError(f"La URL #{index} debe ser un objeto JSON.")
@@ -190,6 +192,13 @@ def load_url_configs() -> list[dict[str, object]]:
             raise RuntimeError(f"La URL #{index} no tiene un campo name valido.")
         if not isinstance(config.get("url"), str) or not config["url"].strip():
             raise RuntimeError(f"La URL #{index} no tiene un campo url valido.")
+        normalized_url = normalize_url(str(config["url"]))
+        if normalized_url in seen_urls:
+            raise RuntimeError(
+                "MONITOR_URLS_JSON contiene URLs duplicadas: "
+                f"la URL #{index} ya existe en la posicion #{seen_urls[normalized_url]}."
+            )
+        seen_urls[normalized_url] = index
         mode = config.get("mode", "auto")
         if mode not in {"auto", "manual_summary"}:
             raise RuntimeError(
@@ -254,6 +263,11 @@ def extract_first_url(text: str) -> str | None:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
     return url
+
+
+def is_delete_url_command(text: str) -> bool:
+    command = text.strip().split(maxsplit=1)[0].casefold()
+    return command == DELETE_URL_COMMAND or command.startswith(f"{DELETE_URL_COMMAND}@")
 
 
 def load_telegram_offset() -> int:
@@ -1290,6 +1304,42 @@ def send_delete_url_selector(
         response.raise_for_status()
 
 
+def answer_telegram_callback_query(
+    callback_query_id: str,
+    text: str = "",
+) -> None:
+    if DRY_RUN:
+        print("\n--- CALLBACK TELEGRAM DRY_RUN ---")
+        print(f"Callback query: {callback_query_id}")
+        if text:
+            print(text)
+        print("--- FIN CALLBACK ---\n")
+        return
+
+    if not TELEGRAM_BOT_TOKEN:
+        print("Telegram no configurado: no se puede responder el callback.")
+        return
+
+    payload: dict[str, object] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text[:200]
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    with httpx.Client(timeout=30) as client:
+        response = client.post(api_url, json=payload)
+        response.raise_for_status()
+
+
+def try_answer_telegram_callback_query(
+    callback_query_id: str,
+    text: str = "",
+) -> None:
+    try:
+        answer_telegram_callback_query(callback_query_id, text)
+    except Exception as exc:
+        print(f"No se pudo responder el callback de Telegram: {exc}", file=sys.stderr)
+
+
 def send_telegram_document(
     path: Path,
     caption: str,
@@ -1415,6 +1465,26 @@ def encrypt_github_secret(public_key_value: str, secret_value: str) -> str:
     return base64.b64encode(encrypted).decode("utf-8")
 
 
+def raise_github_secret_update_error(
+    error: httpx.HTTPStatusError,
+    secret_name: str,
+) -> None:
+    status_code = error.response.status_code
+    if status_code == 401:
+        raise RuntimeError(
+            f"GitHub no acepta GH_SECRETS_PAT al actualizar {secret_name}. "
+            "Regenera el token y guardalo de nuevo como secret del repositorio. "
+            "Debe ser un fine-grained PAT vigente para este repo con permiso "
+            "Secrets: Read and write."
+        ) from error
+    if status_code == 403:
+        raise RuntimeError(
+            f"GH_SECRETS_PAT no tiene permisos suficientes para actualizar {secret_name}. "
+            "Debe tener permiso Secrets: Read and write en este repositorio."
+        ) from error
+    raise error
+
+
 def update_github_secret(
     secret_name: str,
     secret_value: str,
@@ -1442,7 +1512,10 @@ def update_github_secret(
 
     with httpx.Client(headers=headers, timeout=30) as client:
         public_key_response = client.get(f"{base_url}/public-key")
-        public_key_response.raise_for_status()
+        try:
+            public_key_response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise_github_secret_update_error(exc, secret_name)
         public_key_payload = public_key_response.json()
 
         encrypted_value = encrypt_github_secret(
@@ -1456,7 +1529,10 @@ def update_github_secret(
                 "key_id": public_key_payload["key_id"],
             },
         )
-        update_response.raise_for_status()
+        try:
+            update_response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise_github_secret_update_error(exc, secret_name)
 
 
 def update_monitor_urls_secret(configs: list[dict[str, object]]) -> None:
@@ -1604,6 +1680,12 @@ def add_urls_from_telegram_messages_legacy(
 def process_telegram_updates(
     configs: list[dict[str, object]],
 ) -> list[dict[str, object]]:
+    return process_telegram_updates_v2(configs)
+
+
+def process_telegram_updates_v2(
+    configs: list[dict[str, object]],
+) -> list[dict[str, object]]:
     offset = load_telegram_offset()
     updates = fetch_telegram_updates(offset)
     if not updates:
@@ -1613,7 +1695,9 @@ def process_telegram_updates(
     existing_urls = {normalize_url(str(config["url"])) for config in new_configs}
     added_urls: list[str] = []
     deleted_configs: list[dict[str, object]] = []
-    missing_delete_tokens: list[str] = []
+    missing_delete_callbacks: list[tuple[str | None, str]] = []
+    successful_delete_callback_ids: list[str] = []
+    selector_request_count = 0
     max_processed_update_id = offset
 
     for update in updates:
@@ -1626,21 +1710,29 @@ def process_telegram_updates(
 
         if isinstance(callback_query, dict):
             max_processed_update_id = max(max_processed_update_id, update_id)
+            callback_query_id = callback_query.get("id")
+            callback_id = callback_query_id if isinstance(callback_query_id, str) else None
             if not is_allowed_telegram_user(callback_query):
+                if callback_id:
+                    try_answer_telegram_callback_query(callback_id, "No autorizado.")
                 continue
 
             token = extract_delete_url_callback_token(callback_query)
             if not token:
+                if callback_id:
+                    try_answer_telegram_callback_query(callback_id, "Accion no reconocida.")
                 continue
 
             config_index = find_delete_url_config_index(new_configs, token)
             if config_index is None:
-                missing_delete_tokens.append(token)
+                missing_delete_callbacks.append((callback_id, token))
                 continue
 
             deleted_config = new_configs.pop(config_index)
             existing_urls.discard(normalize_url(str(deleted_config["url"])))
             deleted_configs.append(deleted_config)
+            if callback_id:
+                successful_delete_callback_ids.append(callback_id)
             continue
 
         if not isinstance(message, dict):
@@ -1653,6 +1745,12 @@ def process_telegram_updates(
             continue
 
         if not is_allowed_telegram_user(message):
+            max_processed_update_id = max(max_processed_update_id, update_id)
+            continue
+
+        if is_delete_url_command(text):
+            send_delete_url_selector(new_configs)
+            selector_request_count += 1
             max_processed_update_id = max(max_processed_update_id, update_id)
             continue
 
@@ -1681,11 +1779,15 @@ def process_telegram_updates(
 
     has_secret_changes = bool(added_urls or deleted_configs)
     if not has_secret_changes:
-        for token in missing_delete_tokens:
+        for callback_id, token in missing_delete_callbacks:
+            if callback_id:
+                try_answer_telegram_callback_query(callback_id, "La URL ya no existe.")
             try_send_message(
                 "ℹ️ URL no encontrada\n\n"
                 f"El selector ya no coincide con MONITOR_URLS_JSON ({token})."
             )
+        if selector_request_count:
+            print(f"Selectores delete-url enviados: {selector_request_count}")
         save_telegram_offset(max_processed_update_id)
         return configs
 
@@ -1704,6 +1806,8 @@ def process_telegram_updates(
                 f"🔗 URL: {config['url']}\n\n"
                 f"🧾 Detalle: {detail}"
             )
+        for callback_id in successful_delete_callback_ids:
+            try_answer_telegram_callback_query(callback_id, "No se pudo eliminar.")
         print(
             "No se pudo actualizar MONITOR_URLS_JSON. "
             "No se avanza el offset de Telegram para poder reintentar.",
@@ -1711,6 +1815,8 @@ def process_telegram_updates(
         )
         return configs
 
+    for callback_id in successful_delete_callback_ids:
+        try_answer_telegram_callback_query(callback_id, "URL eliminada.")
     for url in added_urls:
         try_send_message(
             f"✅ URL añadida\n\n"
@@ -1725,12 +1831,16 @@ def process_telegram_updates(
             f"🔗 URL: {config['url']}\n\n"
             "Se ha actualizado MONITOR_URLS_JSON."
         )
-    for token in missing_delete_tokens:
+    for callback_id, token in missing_delete_callbacks:
+        if callback_id:
+            try_answer_telegram_callback_query(callback_id, "La URL ya no existe.")
         try_send_message(
             "ℹ️ URL no encontrada\n\n"
             f"El selector ya no coincide con MONITOR_URLS_JSON ({token})."
         )
 
+    if selector_request_count:
+        print(f"Selectores delete-url enviados: {selector_request_count}")
     save_telegram_offset(max_processed_update_id)
     return new_configs
 
