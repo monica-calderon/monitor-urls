@@ -156,7 +156,10 @@ class TelegramDeleteUrlTests(unittest.TestCase):
         self.assertEqual(update_secret.call_args.args[0], result)
         save_offset.assert_called_once_with(1)
         self.assertIn("URL eliminada", send_message.call_args.args[0])
-        answer_callback.assert_called_once_with("callback-1", "URL eliminada.")
+        sent_messages = "\n".join(call.args[0] for call in send_message.call_args_list)
+        self.assertIn("Solicitud de eliminacion recibida", sent_messages)
+        self.assertIn("URL eliminada", sent_messages)
+        answer_callback.assert_called_once_with("callback-1", "Procesando eliminacion...")
 
     def test_callback_from_unauthorized_user_does_not_delete(self) -> None:
         configs = sample_configs()

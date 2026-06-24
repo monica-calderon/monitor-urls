@@ -1696,7 +1696,6 @@ def process_telegram_updates_v2(
     added_urls: list[str] = []
     deleted_configs: list[dict[str, object]] = []
     missing_delete_callbacks: list[tuple[str | None, str]] = []
-    successful_delete_callback_ids: list[str] = []
     selector_request_count = 0
     max_processed_update_id = offset
 
@@ -1732,7 +1731,16 @@ def process_telegram_updates_v2(
             existing_urls.discard(normalize_url(str(deleted_config["url"])))
             deleted_configs.append(deleted_config)
             if callback_id:
-                successful_delete_callback_ids.append(callback_id)
+                try_answer_telegram_callback_query(
+                    callback_id,
+                    "Procesando eliminacion...",
+                )
+            try_send_message(
+                "🧾 Solicitud de eliminacion recibida\n\n"
+                f"🏷️ Nombre: {deleted_config['name']}\n"
+                f"🔗 URL: {deleted_config['url']}\n\n"
+                "Voy a actualizar MONITOR_URLS_JSON."
+            )
             continue
 
         if not isinstance(message, dict):
@@ -1806,8 +1814,6 @@ def process_telegram_updates_v2(
                 f"🔗 URL: {config['url']}\n\n"
                 f"🧾 Detalle: {detail}"
             )
-        for callback_id in successful_delete_callback_ids:
-            try_answer_telegram_callback_query(callback_id, "No se pudo eliminar.")
         print(
             "No se pudo actualizar MONITOR_URLS_JSON. "
             "No se avanza el offset de Telegram para poder reintentar.",
@@ -1815,8 +1821,6 @@ def process_telegram_updates_v2(
         )
         return configs
 
-    for callback_id in successful_delete_callback_ids:
-        try_answer_telegram_callback_query(callback_id, "URL eliminada.")
     for url in added_urls:
         try_send_message(
             f"✅ URL añadida\n\n"
